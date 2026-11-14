@@ -1679,6 +1679,50 @@ struct App {
     startup_want: Vec<bool>,
     startup_rx: Option<Receiver<Vec<StartupItem>>>,
     startup_loaded: bool,
+    /// Actualizador: versión nueva disponible en GitHub y estado.
+    upd: Option<String>,
+    upd_rx: Option<Receiver<Option<String>>>,
+    upd_dl: Option<Receiver<Result<(), String>>>,
+}
+
+const REPO: &str = "KevshuppDev/KevWinOptimizer";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// "v1.2.3" -> [1, 2, 3]
+fn parse_ver(s: &str) -> Vec<u32> {
+    s.trim().trim_start_matches(['v', 'V']).split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// Consulta la última release en GitHub; devuelve el tag si es más nueva.
+fn check_update() -> Option<String> {
+    let (ok, out) = ps(&format!(
+        "[Net.ServicePointManager]::SecurityProtocol='Tls12'; (Invoke-RestMethod 'https://api.github.com/repos/{REPO}/releases/latest' -Headers @{{'User-Agent'='KevWinOptimizer'}} -TimeoutSec 10).tag_name"
+    ));
+    let tag = out.into_iter().rev().find(|l| l.starts_with('v'))?;
+    (ok && parse_ver(&tag) > parse_ver(VERSION)).then_some(tag)
+}
+
+/// Descarga el nuevo .exe y lanza un script que sustituye el actual al cerrarse la app.
+fn download_update() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_s = exe.display().to_string().replace('\'', "''");
+    let new_s = format!("{exe_s}.new");
+    let (ok, out) = ps(&format!(
+        "[Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest 'https://github.com/{REPO}/releases/latest/download/KevWinOptimizer.exe' -OutFile '{new_s}' -UseBasicParsing; if ((Get-Item '{new_s}').Length -lt 100000) {{ throw 'descarga incompleta' }}"
+    ));
+    if !ok {
+        return Err(out.last().cloned().unwrap_or_else(|| "error al descargar".into()));
+    }
+    let pid = std::process::id();
+    let script = format!(
+        "Wait-Process -Id {pid} -EA SilentlyContinue; Start-Sleep -Milliseconds 500; Move-Item -Force '{new_s}' '{exe_s}'; Start-Process '{exe_s}'"
+    );
+    Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 const LOG_W: f32 = 380.0;
@@ -1708,6 +1752,13 @@ impl App {
         };
         app.refresh_status(ctx);
         app.refresh_apps(ctx);
+        let (tx, rx) = channel();
+        app.upd_rx = Some(rx);
+        let c = ctx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(check_update());
+            c.request_repaint();
+        });
         app
     }
 
@@ -2269,6 +2320,20 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        if let Some(Ok(v)) = self.upd_rx.as_ref().map(|r| r.try_recv()) {
+            self.upd_rx = None;
+            if let Some(tag) = &v {
+                self.log.push((Kind::Info, format!("Nueva versión disponible: {tag} (tienes v{VERSION})")));
+            }
+            self.upd = v;
+        }
+        if let Some(Ok(r)) = self.upd_dl.as_ref().map(|r| r.try_recv()) {
+            self.upd_dl = None;
+            match r {
+                Ok(()) => std::process::exit(0),
+                Err(e) => self.log.push((Kind::Err, format!("No se pudo actualizar: {e}"))),
+            }
+        }
         let busy = self.busy();
         let enabled = !busy && !self.ask_restart;
 
@@ -2287,7 +2352,25 @@ impl eframe::App for App {
                         let p = ui.painter();
                         p.text(r.left_center() + vec2(3.0, 3.0), Align2::LEFT_CENTER, "OPTIMIZADOR", f.clone(), DARK);
                         p.text(r.left_center(), Align2::LEFT_CENTER, "OPTIMIZADOR", f, YELLOW);
-                        ui.label(egui::RichText::new("v0.3  ·  modo administrador  ·  Windows").color(GRAY).size(12.0));
+                        ui.label(egui::RichText::new(format!("v{VERSION}  ·  modo administrador  ·  Windows")).color(GRAY).size(12.0));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.upd_dl.is_some() {
+                            ui.label(egui::RichText::new("Descargando actualización...").color(YELLOW).size(12.0));
+                        } else if let Some(tag) = self.upd.clone() {
+                            if pixel_small(ui, &format!("ACTUALIZAR A {tag}"), LIME, enabled)
+                                .on_hover_text("Descarga la nueva versión desde GitHub y reinicia la app")
+                                .clicked()
+                            {
+                                let (tx, rx) = channel();
+                                self.upd_dl = Some(rx);
+                                let c = ctx.clone();
+                                thread::spawn(move || {
+                                    let _ = tx.send(download_update());
+                                    c.request_repaint();
+                                });
+                            }
+                        }
                     });
                 });
                 ui.add_space(6.0);
