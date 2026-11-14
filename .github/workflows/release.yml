@@ -1,0 +1,34 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Caché de cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compilar
+        run: cargo build --release --locked
+
+      - name: Preparar ejecutable
+        shell: pwsh
+        run: Copy-Item target\release\optimizador.exe KevWinOptimizer.exe
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: KevWinOptimizer.exe
+          generate_release_notes: true
