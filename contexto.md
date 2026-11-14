@@ -9,6 +9,13 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
 - Flujo acordado: tras cada cambio, Claude compila, cierra el `Optimizador` abierto, copia el `.exe` al escritorio y lo abre.
 - Icono: `assets/icon.ico` (monitor pixel art 16x16, varios tamaños) incrustado con `build.rs` + `embed-resource`; el icono de ventana se genera del mismo sprite (`SPR_ICON`).
 - Se auto-eleva a administrador al abrir (`net session` + `Start-Process -Verb RunAs`), así que cada apertura pide UAC.
+- Versión en `Cargo.toml` (`VERSION` = `CARGO_PKG_VERSION`, se muestra en la cabecera). Actual: **1.0.0**.
+
+## GitHub y releases
+- Repo: https://github.com/KevshuppDev/KevWinOptimizer (licencia MIT, README en español). Git instalado en `C:\Program Files\Git`; credenciales con Git Credential Manager.
+- `.github/workflows/release.yml`: al subir un tag `v*` compila en `windows-latest` (toolchain **MSVC**, no GNU) y publica `KevWinOptimizer.exe` en la Release.
+- Para sacar versión: subir `version` en `Cargo.toml`, commit, `git tag vX.Y.Z` y `git push origin vX.Y.Z`.
+- **Actualizador**: al abrir, consulta `releases/latest` con `ureq` (en Rust, sin PowerShell); si hay versión mayor muestra el botón `NUEVA VERSIÓN vX` que abre la página de la release en el navegador.
 
 ## Diseño
 - Paleta retro de 16 colores, fuente monoespaciada, sin esquinas redondeadas, bordes gruesos y sombras duras.
@@ -28,6 +35,7 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
 - **APPS → INSTALAR**: ~120 apps por categorías (IA y agentes, programación base/lenguajes/herramientas, bases de datos, navegadores, comunicación, multimedia, oficina, utilidades, juegos, runtimes para juegos, drivers, hardware). Todos los IDs se verificaron con `winget show`.
   - Prefijos de id: normal = winget; sin punto = Microsoft Store (`--source msstore`); `vscode:` = extensión de VS Code; `custom:` = instalador propio (Oracle XE 11g desde Google Drive, no oficial); `web:` = abre la web (AMD).
   - Packs (alternan marcar/quitar): Personal, Rust, Web, IA, Oracle, Gamer.
+  - **Buscador**: filtra por nombre, categoría, id o descripción (varias palabras, sin importar tildes ni mayúsculas); "todas" de cada categoría solo afecta a lo visible.
   - Detecta lo instalado: `winget export` + ejecutables en el PATH y carpetas típicas (portables como `C:\mingw64`, `C:\xampp`) + paquetes AppX + extensiones de VS Code. Lo instalado sale bloqueado como INSTALADA.
   - Detecta GPU/CPU y marca con ★ el driver recomendado (este PC: Intel HD 620 / i5-7300U → Intel DSA).
 - **APPS → QUITAR BLOATWARE**: 34 apps preinstaladas conocidas; solo muestra las presentes, con etiqueta RECOMENDADO para las seguras.
@@ -40,6 +48,7 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
 - `winget list` recorta IDs; usar `winget export` a un JSON en `%TEMP%`.
 - La salida de `sfc` es UTF-16: se quitan los `\0`. Las barras de progreso de winget/DISM se filtran.
 - Intel DSA choca con la limpieza "Servicios de Intel" y el pack de servicios de Intel (los desactivan).
+- **Defender** marcó el exe como `Behavior:Win32/DefenseEvasion.A!ml` (falso positivo por IA). Lo agravó un auto-actualizador que descargaba el exe con PowerShell oculto y se reemplazaba solo: **no volver a hacer eso** ni lanzar PowerShell oculto con `-ExecutionPolicy Bypass` para ir a internet. El exe nuevo aún lo detecta al compilar; pendiente reportarlo en https://www.microsoft.com/wdsi/filesubmission.
 
 ## Cambios ya aplicados al sistema (fuera de la app)
 - Servicios de Intel desactivados: `DSAService`, `ESRV_SVC_QUEENCREEK`, `SystemUsageReportSvc_QUEENCREEK`, `USER_ESRV_SVC_QUEENCREEK`.
@@ -47,6 +56,7 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
 - Quitados: Outlook (nuevo), Teams (personal) y Obtener ayuda.
 
 ## Pendiente / ideas
+- Borrar la Release v1.0.0 vieja (exe con el actualizador peligroso) y relanzar el workflow; hacer público el repo.
 - Comprobar que Contactos y Wallet se quitan con el nuevo orden de borrado.
 - Probar en la práctica la instalación de Oracle XE 11g y de las apps de la Store.
 - Ideas sin hacer: limpieza de Prefetch, caché de fuentes e iconos, Windows.old, shaders; servicios a manual estilo WinUtil; reserva de almacenamiento; archivo de paginación.

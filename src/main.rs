@@ -1349,8 +1349,32 @@ fn app_chip(
 }
 
 /// Lista de apps agrupada por categoría, con packs y tooltips.
-fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: &str, enabled: bool, height: f32) {
+/// Minúsculas y sin tildes, para buscar sin importar acentos.
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' => 'a',
+            'é' | 'è' | 'ë' => 'e',
+            'í' | 'ì' | 'ï' => 'i',
+            'ó' | 'ò' | 'ö' => 'o',
+            'ú' | 'ù' | 'ü' => 'u',
+            c => c,
+        })
+        .collect()
+}
+
+fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: &str, search: &mut String, enabled: bool, height: f32) {
     let installed = |i: usize| st.get(i) == Some(&Some(true));
+    // todas las palabras deben aparecer en nombre, id, descripción o categoría
+    let words: Vec<String> = fold(search).split_whitespace().map(String::from).collect();
+    let visible: Vec<bool> = APPS
+        .iter()
+        .map(|(cat, name, id, desc)| {
+            let hay = fold(&format!("{cat} {name} {id} {desc}"));
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .collect();
     pixel_frame(PANEL).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
             let n = sel.iter().filter(|&&s| s).count();
@@ -1390,15 +1414,33 @@ fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: &str, enabl
                 }
             });
         });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("BUSCAR").color(CYAN).size(12.0));
+            let w = (ui.available_width() - 70.0).max(120.0);
+            ui.add(egui::TextEdit::singleline(search).desired_width(w).hint_text("nombre, categoría o id (ej. python, navegador)..."));
+            if !search.is_empty() && ui.small_button("✖").on_hover_text("Limpiar búsqueda").clicked() {
+                search.clear();
+            }
+        });
+        let shown = visible.iter().filter(|&&v| v).count();
         egui::ScrollArea::vertical()
             .id_salt("apps")
-            .max_height(height.max(80.0))
+            .max_height((height - 30.0).max(80.0))
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                if shown == 0 {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("No hay apps que coincidan con la búsqueda.").color(GRAY).size(12.0));
+                }
                 let mut start = 0;
                 while start < APPS.len() {
                     let cat = APPS[start].0;
                     let end = start + APPS[start..].iter().take_while(|a| a.0 == cat).count();
+                    if !(start..end).any(|i| visible[i]) {
+                        start = end;
+                        continue;
+                    }
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(vec2(6.0, 14.0), Sense::hover());
@@ -1408,7 +1450,7 @@ fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: &str, enabl
                             ui.label(egui::RichText::new(format!("Tu PC: {hw}")).color(YELLOW).size(10.0))
                                 .on_hover_text("Lo recomendado para tu hardware tiene borde amarillo ★");
                         }
-                        let free: Vec<usize> = (start..end).filter(|&i| !installed(i)).collect();
+                        let free: Vec<usize> = (start..end).filter(|&i| visible[i] && !installed(i)).collect();
                         let all = free.iter().all(|&i| sel[i]);
                         ui.add_enabled_ui(enabled && !free.is_empty(), |ui| {
                             if ui.small_button(if all && !free.is_empty() { "quitar" } else { "todas" }).clicked() {
@@ -1423,7 +1465,7 @@ fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: &str, enabl
                     let chip_w = ((w - gap * (cols - 1.0)) / cols).floor();
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(gap, gap);
-                        for i in start..end {
+                        for i in (start..end).filter(|&i| visible[i]) {
                             let (_, name, id, desc) = APPS[i];
                             let state = st.get(i).copied().flatten();
                             let star = matches_hw(id, hw);
@@ -1682,6 +1724,8 @@ struct App {
     /// Actualizador: versión nueva disponible en GitHub y estado.
     upd: Option<String>,
     upd_rx: Option<Receiver<Option<String>>>,
+    /// Texto del buscador de APPS.
+    app_search: String,
 }
 
 const REPO: &str = "KevshuppDev/KevWinOptimizer";
@@ -2287,7 +2331,7 @@ impl App {
                     return;
                 }
                 let list_h = ui.available_height() - 110.0;
-                apps_list(ui, &mut self.sel_apps, &self.st_apps, &self.hw, enabled, list_h);
+                apps_list(ui, &mut self.sel_apps, &self.st_apps, &self.hw, &mut self.app_search, enabled, list_h);
                 if self.apps_rx.is_some() {
                     note(ui, "Buscando apps ya instaladas...");
                 }
