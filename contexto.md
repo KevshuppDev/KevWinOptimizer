@@ -1,4 +1,4 @@
-# Optimizador de Windows (Rust)
+﻿# Optimizador de Windows (Rust)
 
 App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantáneo). Nació juntando `Optimizar.bat` y `Reiniciar Red.bat`; hoy es un "WinUtil" propio con estilo **pixel art**. Todo el código está en `src/main.rs`.
 
@@ -9,7 +9,7 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
 - Flujo acordado: tras cada cambio, Claude compila, cierra el `Optimizador` abierto, copia el `.exe` al escritorio y lo abre.
 - Icono: `assets/icon.ico` (monitor pixel art 16x16, varios tamaños) incrustado con `build.rs` + `embed-resource`; el icono de ventana se genera del mismo sprite (`SPR_ICON`).
 - Se auto-eleva a administrador al abrir (`net session` + `Start-Process -Verb RunAs`), así que cada apertura pide UAC.
-- Versión en `Cargo.toml` (`VERSION` = `CARGO_PKG_VERSION`, se muestra en la cabecera). Actual: **1.0.0**.
+- Versión en `Cargo.toml` (`VERSION` = `CARGO_PKG_VERSION`, se muestra en la cabecera). Actual: **1.0.1**.
 
 ## GitHub y releases
 - Repo: https://github.com/KevshuppDev/KevWinOptimizer (licencia MIT, README en español). Git instalado en `C:\Program Files\Git`; credenciales con Git Credential Manager.
