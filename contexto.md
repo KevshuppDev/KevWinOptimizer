@@ -40,6 +40,11 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
   - Detecta GPU/CPU y marca con ★ el driver recomendado (este PC: Intel HD 620 / i5-7300U → Intel DSA).
 - **APPS → QUITAR BLOATWARE**: 34 apps preinstaladas conocidas; solo muestra las presentes, con etiqueta RECOMENDADO para las seguras.
 
+- **CONFIG** (`src/fondo.rs`): config en `%APPDATA%\KevWinOptimizer\config.txt`.
+  - Icono de bandeja (`tray-icon`) con el menú Abrir / Limpiar ahora / Salir. Si "Cerrar a la bandeja" está activo, la X oculta la ventana (Win32 `ShowWindow`).
+  - "Abrir al encender": tarea `KevWinOptimizer` del Programador de tareas (AtLogOn, RunLevel Highest, sin UAC) que arranca con `--tray`, oculta en la bandeja.
+  - Limpieza programada: cada 1/3/7/14/30 días a partir de una hora, con tareas propias. La corre un hilo de fondo (aunque la ventana esté oculta) y su salida se vuelca al registro.
+
 ## Lecciones aprendidas (bugs ya resueltos)
 - Los scripts de PowerShell se pasan por línea de comandos: **no usar comillas dobles** dentro (se pierden). Solo comillas simples, `-f` y `Join-Path`.
 - Dentro de `if (...)` de PowerShell no puede ir `;` → las comprobaciones se envuelven en `& { ... }`.

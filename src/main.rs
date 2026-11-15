@@ -4,7 +4,13 @@ use eframe::egui::{
     self, epaint::Shadow, pos2, vec2, Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect,
     Response, Rounding, Sense, Stroke, Ui,
 };
+mod fondo;
+
+use fondo::Config;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::os::windows::process::CommandExt;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -1635,15 +1641,17 @@ enum Tab {
     Rendimiento,
     Reparar,
     Apps,
+    Config,
 }
 
-const TABS: [(Tab, &str); 6] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Limpieza, "LIMPIEZA"),
     (Tab::Red, "RED"),
     (Tab::Privacidad, "PRIVACIDAD"),
     (Tab::Rendimiento, "RENDIMIENTO"),
     (Tab::Reparar, "REPARAR"),
     (Tab::Apps, "APPS"),
+    (Tab::Config, "CONFIG"),
 ];
 
 fn main() -> eframe::Result<()> {
@@ -1653,7 +1661,7 @@ fn main() -> eframe::Result<()> {
             let path = exe.display().to_string().replace('\'', "''");
             let _ = Command::new("powershell")
                 .args(["-NoProfile", "-Command"])
-                .arg(format!("Start-Process '{path}' -Verb RunAs"))
+                .arg(format!("Start-Process '{path}' -Verb RunAs{}", if std::env::args().any(|a| a == "--tray") { " -ArgumentList '--tray'" } else { "" }))
                 .creation_flags(CREATE_NO_WINDOW)
                 .status();
         }
@@ -1726,6 +1734,15 @@ struct App {
     upd_rx: Option<Receiver<Option<String>>>,
     /// Texto del buscador de APPS.
     app_search: String,
+    /// Configuración compartida con el programador de limpieza.
+    cfg: Arc<Mutex<Config>>,
+    sched_log: fondo::SharedLog,
+    tray_ok: bool,
+    /// Arrancado con --tray: ocultar la ventana en el primer frame.
+    start_hidden: bool,
+    hwnd_set: bool,
+    autostart: Option<bool>,
+    autostart_rx: Option<Receiver<Result<bool, String>>>,
 }
 
 const REPO: &str = "KevshuppDev/KevWinOptimizer";
@@ -1785,6 +1802,11 @@ impl App {
             st_apps: vec![None; APPS.len()],
             ..Default::default()
         };
+        app.start_hidden = std::env::args().any(|a| a == "--tray");
+        app.cfg = Arc::new(Mutex::new(Config::load()));
+        app.tray_ok = fondo::create_tray(ctx, &window_icon());
+        fondo::start_scheduler(app.cfg.clone(), app.sched_log.clone());
+        app.check_autostart(None);
         app.refresh_status(ctx);
         app.refresh_apps(ctx);
         let (tx, rx) = channel();
@@ -2097,6 +2119,110 @@ impl App {
         self.rx.is_some()
     }
 
+    /// Consulta (o cambia) el inicio con Windows en segundo plano.
+    fn check_autostart(&mut self, set: Option<bool>) {
+        let (tx, rx) = channel();
+        self.autostart_rx = Some(rx);
+        self.autostart = None;
+        thread::spawn(move || {
+            let res = match set {
+                Some(on) => fondo::set_autostart(on).map(|_| fondo::autostart_enabled()),
+                None => Ok(fondo::autostart_enabled()),
+            };
+            let _ = tx.send(res);
+        });
+    }
+
+    fn config_ui(&mut self, ui: &mut Ui, enabled: bool) {
+        if let Some(Ok(res)) = self.autostart_rx.as_ref().map(|r| r.try_recv()) {
+            self.autostart_rx = None;
+            match res {
+                Ok(v) => self.autostart = Some(v),
+                Err(e) => {
+                    self.autostart = Some(fondo::autostart_enabled());
+                    self.log.push((Kind::Err, format!("No se pudo cambiar el inicio con Windows: {e}")));
+                }
+            }
+        }
+        if self.autostart_rx.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(200));
+        }
+        let mut cfg = self.cfg.lock().unwrap().clone();
+        let before = (cfg.tray_on_close, cfg.sched_on, cfg.sched_days, cfg.sched_hour, cfg.sched_sel.clone());
+
+        pixel_frame(PANEL).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("GENERAL").color(YELLOW).size(13.0));
+            let mut auto = self.autostart.unwrap_or(false);
+            let badge = if self.autostart.is_none() { Some(("...", GRAY)) } else { None };
+            let was = auto;
+            pixel_check(ui, &mut auto, "Abrir al encender", "Arranca en la bandeja al iniciar sesión, sin pedir UAC", self.autostart.is_some(), badge,
+                Some("Crea una tarea en el Programador de tareas con privilegios elevados."));
+            if auto != was {
+                self.check_autostart(Some(auto));
+            }
+            pixel_check(ui, &mut cfg.tray_on_close, "Cerrar a la bandeja", "La X oculta la ventana; sal desde el icono", self.tray_ok,
+                (!self.tray_ok).then_some(("SIN BANDEJA", RED)), None);
+        });
+        ui.add_space(8.0);
+
+        pixel_frame(PANEL).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("LIMPIEZA PROGRAMADA").color(YELLOW).size(13.0));
+            let was_on = cfg.sched_on;
+            pixel_check(ui, &mut cfg.sched_on, "Limpiar automáticamente", "Necesita la app abierta o en la bandeja", enabled, None, None);
+            if cfg.sched_on && !was_on {
+                // la primera vez toca dentro de N días
+                cfg.last_day = fondo::local_now().day;
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Cada").color(GRAY));
+                for d in fondo::DAY_OPTS {
+                    let name = if d == 1 { "1 DÍA".to_string() } else { format!("{d} DÍAS") };
+                    if pixel_tab(ui, &name, cfg.sched_days == d).clicked() {
+                        cfg.sched_days = d;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("A partir de las").color(GRAY));
+                if pixel_small(ui, "-", GRAY, cfg.sched_hour > 0).clicked() {
+                    cfg.sched_hour -= 1;
+                }
+                ui.label(egui::RichText::new(format!("{:02}:00", cfg.sched_hour)).color(LIME).size(15.0));
+                if pixel_small(ui, "+", GRAY, cfg.sched_hour < 23).clicked() {
+                    cfg.sched_hour += 1;
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(format!("Próxima: {}", fondo::next_text(&cfg))).color(TEXT).size(12.0));
+            let last = if cfg.last_text.is_empty() { "nunca".to_string() } else { cfg.last_text.clone() };
+            ui.label(egui::RichText::new(format!("Última: {last}")).color(GRAY).size(12.0));
+        });
+        ui.add_space(8.0);
+        let items: Vec<_> = OPTS.iter().map(|o| (o.0, o.1)).collect();
+        let defs: Vec<_> = OPTS.iter().map(|o| o.2).collect();
+        let h = ui.available_height() - 70.0;
+        check_list(ui, "TAREAS PROGRAMADAS", &items, &mut cfg.sched_sel, Some(&defs), None, enabled, 2, h);
+        note(ui, "Si la PC estaba apagada a esa hora, se limpia al volver a abrir la app.");
+
+        let after = (cfg.tray_on_close, cfg.sched_on, cfg.sched_days, cfg.sched_hour, cfg.sched_sel.clone());
+        if before != after {
+            let mut g = self.cfg.lock().unwrap();
+            g.tray_on_close = cfg.tray_on_close;
+            g.sched_on = cfg.sched_on;
+            g.sched_days = cfg.sched_days;
+            g.sched_hour = cfg.sched_hour;
+            g.sched_sel = cfg.sched_sel;
+            if cfg.sched_on && !before.1 {
+                g.last_day = cfg.last_day;
+            }
+            g.save();
+        }
+    }
+
     fn start(
         &mut self,
         ctx: &egui::Context,
@@ -2315,6 +2441,7 @@ impl App {
                 }
                 note(ui, "SFC y DISM tardan; puedes seguir usando la PC.");
             }
+            Tab::Config => self.config_ui(ui, enabled),
             Tab::Apps => {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -2353,7 +2480,31 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !self.hwnd_set {
+            if let Ok(h) = frame.window_handle() {
+                if let RawWindowHandle::Win32(w) = h.as_raw() {
+                    fondo::HWND.store(w.hwnd.get(), Ordering::Relaxed);
+                    self.hwnd_set = true;
+                    if self.start_hidden && self.tray_ok {
+                        fondo::hide_window();
+                    }
+                }
+            }
+        }
+        // la X oculta la ventana en la bandeja
+        if ctx.input(|i| i.viewport().close_requested()) && self.tray_ok && self.cfg.lock().unwrap().tray_on_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            fondo::hide_window();
+        }
+        // registro de la limpieza programada
+        let lines: Vec<_> = std::mem::take(&mut *self.sched_log.lock().unwrap());
+        self.log.extend(lines);
+        let sched = fondo::SCHED_RUNNING.load(Ordering::Relaxed);
+        if sched {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        fondo::UI_BUSY.store(self.busy(), Ordering::Relaxed);
         self.poll(ctx);
         if let Some(Ok(v)) = self.upd_rx.as_ref().map(|r| r.try_recv()) {
             self.upd_rx = None;
@@ -2362,7 +2513,10 @@ impl eframe::App for App {
             }
             self.upd = v;
         }
-        let busy = self.busy();
+        let busy = self.busy() || sched;
+        if sched {
+            self.task = "Limpieza programada";
+        }
         let enabled = !busy && !self.ask_restart;
 
         // --- cabecera + pestañas ---
