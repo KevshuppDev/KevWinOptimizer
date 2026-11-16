@@ -25,7 +25,7 @@ jobs:
 
       - name: Preparar ejecutable
         shell: pwsh
-        run: Copy-Item target\release\optimizador.exe KevWinOptimizer.exe
+        run: Copy-Item target\release\kevwinoptimizer.exe KevWinOptimizer.exe
 
       - name: Publicar release
         uses: softprops/action-gh-release@v2

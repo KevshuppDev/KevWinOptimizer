@@ -1347,6 +1347,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kevwinoptimizer"
+version = "1.1.0"
+dependencies = [
+ "eframe",
+ "embed-resource",
+ "raw-window-handle",
+ "tray-icon",
+ "ureq",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1881,18 +1893,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "optimizador"
-version = "1.0.1"
-dependencies = [
- "eframe",
- "embed-resource",
- "raw-window-handle",
- "tray-icon",
- "ureq",
- "windows-sys 0.59.0",
-]
 
 [[package]]
 name = "option-ext"

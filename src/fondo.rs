@@ -8,7 +8,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW};
 
@@ -22,6 +22,8 @@ pub const DAY_OPTS: [u32; 5] = [1, 3, 7, 14, 30];
 #[derive(Clone)]
 pub struct Config {
     pub tray_on_close: bool,
+    /// Modo simple: solo acciones seguras para quien no sabe de informática.
+    pub simple: bool,
     pub sched_on: bool,
     pub sched_days: u32,
     pub sched_hour: u32,
@@ -35,6 +37,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tray_on_close: true,
+            simple: true,
             sched_on: false,
             sched_days: 7,
             sched_hour: 12,
@@ -59,6 +62,7 @@ impl Config {
             let v = v.trim();
             match k.trim() {
                 "tray_on_close" => c.tray_on_close = v == "1",
+                "simple" => c.simple = v == "1",
                 "sched_on" => c.sched_on = v == "1",
                 "sched_days" => c.sched_days = v.parse().unwrap_or(7),
                 "sched_hour" => c.sched_hour = v.parse::<u32>().unwrap_or(12).min(23),
@@ -79,8 +83,8 @@ impl Config {
         let b = |x: bool| if x { "1" } else { "0" };
         let sel: String = self.sched_sel.iter().map(|&s| b(s)).collect();
         let txt = format!(
-            "tray_on_close={}\nsched_on={}\nsched_days={}\nsched_hour={}\nsched_sel={sel}\nlast_day={}\nlast_text={}\n",
-            b(self.tray_on_close), b(self.sched_on), self.sched_days, self.sched_hour, self.last_day, self.last_text
+            "tray_on_close={}\nsimple={}\nsched_on={}\nsched_days={}\nsched_hour={}\nsched_sel={sel}\nlast_day={}\nlast_text={}\n",
+            b(self.tray_on_close), b(self.simple), b(self.sched_on), self.sched_days, self.sched_hour, self.last_day, self.last_text
         );
         let p = config_path();
         if let Some(d) = p.parent() {
@@ -180,6 +184,7 @@ pub type SharedLog = Arc<Mutex<Vec<(Kind, String)>>>;
 
 thread_local! {
     static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
+    static PLAN_ITEMS: RefCell<Vec<(CheckMenuItem, String)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn hide_window() {
@@ -211,14 +216,25 @@ fn quit() {
 /// Crea el icono de la bandeja. Devuelve false si no se pudo.
 pub fn create_tray(ctx: &eframe::egui::Context, icon: &eframe::egui::IconData) -> bool {
     let _ = CTX.set(ctx.clone());
-    let open = MenuItem::new("Abrir Optimizador", true, None);
+    let open = MenuItem::new("Abrir KevWinOptimizer", true, None);
     let clean = MenuItem::new("Limpiar ahora", true, None);
     let exit = MenuItem::new("Salir", true, None);
+    // submenú con los planes de energía (el activo, marcado)
+    let power = Submenu::new("Plan de energía", true);
+    let mut plan_ids: Vec<(MenuId, String)> = Vec::new();
+    let mut items = Vec::new();
+    for p in crate::energia::power_plans() {
+        let it = CheckMenuItem::new(&p.name, true, p.active, None);
+        let _ = power.append(&it);
+        plan_ids.push((it.id().clone(), p.guid.clone()));
+        items.push((it, p.guid));
+    }
+    PLAN_ITEMS.with(|v| *v.borrow_mut() = items);
     let menu = Menu::new();
-    let _ = menu.append_items(&[&open, &clean, &PredefinedMenuItem::separator(), &exit]);
+    let _ = menu.append_items(&[&open, &clean, &power, &PredefinedMenuItem::separator(), &exit]);
     let Ok(ico) = tray_icon::Icon::from_rgba(icon.rgba.clone(), icon.width, icon.height) else { return false };
     let tray = TrayIconBuilder::new()
-        .with_tooltip("Optimizador")
+        .with_tooltip("KevWinOptimizer")
         .with_icon(ico)
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -239,6 +255,12 @@ pub fn create_tray(ctx: &eframe::egui::Context, icon: &eframe::egui::IconData) -
             show_window();
         } else if e.id == clean {
             FORCE_CLEAN.store(true, Ordering::Relaxed);
+        } else if let Some((_, guid)) = plan_ids.iter().find(|(id, _)| *id == e.id) {
+            crate::energia::set_plan(guid);
+            POWER_DIRTY.store(true, Ordering::Relaxed);
+            if let Some(c) = CTX.get() {
+                c.request_repaint();
+            }
         } else if e.id == exit {
             quit();
         }
@@ -301,4 +323,27 @@ fn run_clean(sel: &[bool], log: &SharedLog, title: &str) {
     let _ = h.join();
     push(Kind::Ok, format!("== {title} terminada =="));
     SCHED_RUNNING.store(false, Ordering::Relaxed);
+}
+
+/// El plan de energía cambió desde la bandeja (la UI debe recargar).
+pub static POWER_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Pone la marca del menú de la bandeja en el plan activo.
+pub fn sync_power_menu() {
+    let plans = crate::energia::power_plans();
+    PLAN_ITEMS.with(|v| {
+        for (it, guid) in v.borrow().iter() {
+            it.set_checked(plans.iter().any(|p| &p.guid == guid && p.active));
+        }
+    });
+}
+
+/// Si la tarea de inicio apunta a otro .exe (se renombró o movió), la vuelve a crear.
+pub fn fix_autostart_path() {
+    let (ok, xml) = run_status("schtasks", &["/Query", "/TN", TASK_NAME, "/XML"]);
+    let Ok(exe) = std::env::current_exe() else { return };
+    let exe = exe.display().to_string().to_lowercase();
+    if ok && !xml.join(" ").to_lowercase().contains(&exe) {
+        let _ = set_autostart(true);
+    }
 }
