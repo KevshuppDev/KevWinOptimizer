@@ -485,6 +485,10 @@ fn detect_apps() -> Vec<Option<bool>> {
     let txt = std::fs::read_to_string(&tmp).unwrap_or_default().to_lowercase();
     let _ = std::fs::remove_file(&tmp);
     let dirs = search_dirs();
+    // portables ya instalados sin acceso directo (de versiones anteriores)
+    for p in PORTABLE_GUI {
+        portable_shortcuts(p.0);
+    }
     // paquetes AppX (apps de la Microsoft Store)
     let (_, appx) = ps("Get-AppxPackage | % Name");
     // extensiones de VS Code instaladas
@@ -569,6 +573,39 @@ fn install_special(r: &Rep, id: &str) -> (bool, Vec<String>) {
         }
         _ => (false, vec![format!("Instalador desconocido: {id}")]),
     }
+}
+
+/// Paquetes de winget que son un `.zip` portable con interfaz gráfica: winget
+/// solo los descomprime en su carpeta `Packages`, sin acceso directo, así que
+/// parece que no se instalaron. (id, exe dentro del paquete, nombre del acceso).
+const PORTABLE_GUI: &[(&str, &str, &str)] = &[("Oracle.SQLDeveloper", r"sqldeveloper\sqldeveloper.exe", "SQL Developer")];
+
+/// Crea los accesos directos (menú Inicio y escritorio) de un paquete portable
+/// si está instalado y aún no tiene el del menú Inicio. Devuelve si los creó.
+fn portable_shortcuts(id: &str) -> bool {
+    let Some(&(_, rel, name)) = PORTABLE_GUI.iter().find(|p| p.0 == id) else { return false };
+    let env = |k: &str| PathBuf::from(std::env::var(k).unwrap_or_default());
+    let lnk = env("APPDATA").join(format!(r"Microsoft\Windows\Start Menu\Programs\{name}.lnk"));
+    if lnk.is_file() {
+        return false;
+    }
+    let prefix = format!("{}_", id.to_lowercase());
+    let exe = [env("LOCALAPPDATA").join(r"Microsoft\WinGet\Packages"), env("ProgramFiles").join(r"WinGet\Packages")]
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flat_map(|es| es.flatten())
+        .filter(|e| e.file_name().to_string_lossy().to_lowercase().starts_with(&prefix))
+        .map(|e| e.path().join(rel))
+        .find(|p| p.is_file());
+    let Some(exe) = exe else { return false };
+    let q = |p: &Path| p.display().to_string().replace('\'', "''");
+    let script = format!(
+        "$w=New-Object -ComObject WScript.Shell; foreach($l in @('{}', (Join-Path ([Environment]::GetFolderPath('Desktop')) '{name}.lnk'))){{ $s=$w.CreateShortcut($l); $s.TargetPath='{}'; $s.WorkingDirectory='{}'; $s.Save() }}",
+        q(&lnk),
+        q(&exe),
+        q(exe.parent().unwrap_or(Path::new(""))),
+    );
+    ps(&script).0 && lnk.is_file()
 }
 
 /// Ejecutables que delatan una herramienta aunque no se haya instalado con winget.
@@ -1081,6 +1118,11 @@ struct App {
     ask_restart: bool,
     task: &'static str,
     progress: Option<(u32, u32)>,
+    /// Cuándo empezó el paso actual: la barra avanza sola dentro del paso.
+    step_at: Option<Instant>,
+    /// Última detección de apps instaladas y si la ventana tenía el foco.
+    apps_at: Option<Instant>,
+    was_focused: bool,
     stats: Vec<(&'static str, String)>,
     started: Option<Instant>,
     elapsed: Option<Duration>,
@@ -1502,6 +1544,7 @@ impl App {
     fn refresh_apps(&mut self, ctx: &egui::Context) {
         let (tx, rx) = channel();
         self.apps_rx = Some(rx);
+        self.apps_at = Some(Instant::now());
         let ctx = ctx.clone();
         thread::spawn(move || {
             let _ = tx.send((detect_apps(), detect_hw()));
@@ -1672,6 +1715,7 @@ impl App {
         self.log.clear();
         self.stats.clear();
         self.progress = None;
+        self.step_at = None;
         self.task = name;
         self.show_log = true; // el registro se abre solo al empezar una tarea
         self.started = Some(Instant::now());
@@ -1717,9 +1761,10 @@ impl App {
         if let Some(rx) = &self.apps_rx {
             if let Ok((v, hw)) = rx.try_recv() {
                 self.hw = hw;
-                // lo instalado no se puede marcar
-                for (o, s) in self.sel_apps.iter_mut().zip(&v) {
-                    *o &= *s != Some(true);
+                // si una app pasó de instalada a no (o al revés) se quita su marca:
+                // si no, lo recién desinstalado quedaría marcado para reinstalar
+                for (i, (o, s)) in self.sel_apps.iter_mut().zip(&v).enumerate() {
+                    *o &= (*s == Some(true)) == (self.st_apps.get(i) == Some(&Some(true)));
                 }
                 self.st_apps = v;
                 self.apps_rx = None;
@@ -1730,7 +1775,10 @@ impl App {
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 Msg::Line(k, l) => self.log.push((k, l)),
-                Msg::Progress(a, b) => self.progress = Some((a, b)),
+                Msg::Progress(a, b) => {
+                    self.progress = Some((a, b));
+                    self.step_at = Some(Instant::now());
+                }
                 Msg::Stat(n, v) => self.stats.push((n, v)),
                 Msg::AskRestart => self.ask_restart = true,
                 Msg::Done => done = true,
@@ -2048,16 +2096,37 @@ impl App {
                     self.import_apps(&p);
                 }
                 let list_h = ui.available_height() - 110.0;
-                apps_list(ui, &mut self.sel_apps, &self.st_apps, &self.hw, &mut self.app_search, enabled, list_h);
+                let reload = apps_list(ui, &mut self.sel_apps, &self.st_apps, &self.hw, &mut self.app_search, enabled, list_h);
+                // al volver a la ventana se vuelve a detectar, por si se instaló o
+                // quitó algo desde fuera (como mucho cada 15 s)
+                let focused = ctx.input(|i| i.focused);
+                let back = focused && !self.was_focused && self.apps_at.map_or(true, |t| t.elapsed() > Duration::from_secs(15));
+                self.was_focused = focused;
+                if (reload || (back && enabled)) && self.apps_rx.is_none() {
+                    self.refresh_apps(ctx);
+                }
                 if self.apps_rx.is_some() {
                     note(ui, "Buscando apps ya instaladas...");
                 }
                 ui.add_space(10.0);
-                let any = self.sel_apps.contains(&true);
+                // marcada + instalada = desinstalar; marcada + no instalada = instalar
+                let is_inst = |i: usize| self.st_apps.get(i) == Some(&Some(true));
+                let n_del = (0..APPS.len()).filter(|&i| self.sel_apps[i] && is_inst(i)).count();
+                let n_add = self.sel_apps.iter().filter(|&&s| s).count() - n_del;
+                let (label, color) = match (n_add, n_del) {
+                    (0, 0) => ("Instalar".to_string(), GREEN),
+                    (a, 0) => (format!("Instalar ({a})"), GREEN),
+                    (0, d) => (format!("Desinstalar ({d})"), ORANGE),
+                    (a, d) => (format!("Aplicar (+{a} / -{d})"), ORANGE),
+                };
                 ui.horizontal(|ui| {
-                    if pixel_button(ui, bw, Some(&SPR_BOX), "Instalar", GREEN, enabled && any).clicked() {
-                        let c = picked(APPS, &self.sel_apps);
-                        self.start(ctx, "Instalar apps", move |r| install_apps(r, &c));
+                    if pixel_button(ui, bw, Some(&SPR_BOX), &label, color, enabled && n_add + n_del > 0).clicked() {
+                        let all = picked(APPS, &self.sel_apps);
+                        let st = self.st_apps.clone();
+                        let (del, add): (Vec<_>, Vec<_>) = all.into_iter().partition(|a| {
+                            APPS.iter().position(|b| b.2 == a.2).is_some_and(|i| st.get(i) == Some(&Some(true)))
+                        });
+                        self.start(ctx, "Instalar apps", move |r| apply_apps(r, &del, &add));
                     }
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
@@ -2208,7 +2277,16 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::none().fill(PANEL).inner_margin(10.0).stroke(Stroke::new(PX, DARK)))
             .show(ctx, |ui| {
-                let frac = self.progress.map(|(a, b)| a as f32 / b.max(1) as f32);
+                // dentro de cada paso la barra avanza sola (rápido al principio, cada
+                // vez más lento, sin llegar al final) para que no parezca colgada:
+                // winget no informa de su progreso cuando no tiene consola.
+                let frac = self.progress.map(|(a, b)| {
+                    let sub = match self.step_at {
+                        Some(t) if busy && a < b => 0.92 * (1.0 - (-t.elapsed().as_secs_f32() / 40.0).exp()),
+                        _ => 0.0,
+                    };
+                    (a as f32 + sub) / b.max(1) as f32
+                });
                 pixel_progress(ui, frac, !busy && self.progress.is_none());
                 ui.horizontal(|ui| {
                     let (txt, col) = if busy {
@@ -2637,15 +2715,67 @@ const WINGET_FLAGS: [&str; 4] = [
     "--disable-interactivity",
 ];
 
-fn install_apps(r: &Rep, list: &[&'static AppPkg]) {
+/// Desinstala `remove` y luego instala `install` (una sola barra de progreso).
+fn apply_apps(r: &Rep, remove: &[&'static AppPkg], install: &[&'static AppPkg]) {
     if run_status("winget", &["--version"]).0 == false {
         r.say(Kind::Err, "winget no está disponible. Instala 'App Installer' desde la Microsoft Store.");
         return;
     }
+    let total = (remove.len() + install.len()) as u32;
+    if !remove.is_empty() {
+        let good = uninstall_apps(r, remove, total);
+        r.stat("DESINSTALADAS", format!("{good}/{}", remove.len()));
+    }
+    if !install.is_empty() {
+        let good = install_apps(r, install, remove.len() as u32, total);
+        r.stat("INSTALADAS", format!("{good}/{}", install.len()));
+    }
+}
+
+fn uninstall_apps(r: &Rep, list: &[&'static AppPkg], total: u32) -> u32 {
+    let mut good = 0;
+    for (i, &&(_, name, id, _)) in list.iter().enumerate() {
+        r.step(i as u32 + 1, total, &format!("Desinstalar {name}"));
+        let (ok, out) = if let Some(ext) = id.strip_prefix("vscode:") {
+            match code_cmd() {
+                Some(code) => run_status("cmd", &["/c", &code.display().to_string(), "--uninstall-extension", ext]),
+                None => (false, vec!["No se encontró VS Code.".into()]),
+            }
+        } else if id.starts_with("custom:") || id.starts_with("web:") {
+            // instaladores propios: su desinstalador pide datos, no se hace a ciegas
+            run_silent("cmd", &["/c", "start", "", "appwiz.cpl"]);
+            (false, vec!["No se puede quitar automáticamente: se abrió Programas y características para que lo desinstales ahí.".into()])
+        } else {
+            run_status(
+                "winget",
+                &["uninstall", "--id", id, "-e", "--silent", "--accept-source-agreements", "--disable-interactivity"],
+            )
+        };
+        if ok {
+            good += 1;
+            r.say(Kind::Ok, "      Desinstalado");
+            // accesos directos que creó la app para los portables
+            if let Some(p) = PORTABLE_GUI.iter().find(|p| p.0 == id) {
+                ps(&format!(
+                    "Remove-Item (Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs\\{0}.lnk'), (Join-Path ([Environment]::GetFolderPath('Desktop')) '{0}.lnk') -ErrorAction SilentlyContinue",
+                    p.2
+                ));
+            }
+        } else {
+            r.tail(Kind::Err, &out, 1);
+            if !id.contains(':') && out.iter().any(|l| l.contains("0x8A150014") || l.to_lowercase().contains("no se encontr") || l.to_lowercase().contains("no installed package")) {
+                r.say(Kind::Dim, "      No se instaló con winget: quítala desde Programas y características.");
+            }
+        }
+    }
+    good
+}
+
+fn install_apps(r: &Rep, list: &[&'static AppPkg], off: u32, total: u32) -> u32 {
     let n = list.len() as u32;
     let mut good = 0;
     for (i, &&(_, name, id, _)) in list.iter().enumerate() {
-        r.step(i as u32 + 1, n, name);
+        r.step(off + i as u32 + 1, total, name);
         if let Some(url) = id.strip_prefix("web:") {
             r.say(Kind::Dim, "      No está en winget: se abre la web oficial en el navegador.");
             run_silent("cmd", &["/c", "start", "", url]);
@@ -2680,11 +2810,15 @@ fn install_apps(r: &Rep, list: &[&'static AppPkg]) {
         if ok {
             good += 1;
             r.say(Kind::Ok, "      Instalado");
+            if portable_shortcuts(id) {
+                r.say(Kind::Dim, "      Acceso directo creado en el escritorio y el menú Inicio");
+            }
         } else {
             r.tail(Kind::Err, &out, 1);
         }
     }
-    r.stat("INSTALADAS", format!("{good}/{n}"));
+    let _ = n;
+    good
 }
 
 fn upgrade_all(r: &Rep) {

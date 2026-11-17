@@ -398,7 +398,9 @@ pub(crate) fn app_chip(
     star: bool,
 ) {
     let installed = state == Some(true);
-    let clickable = enabled && !installed;
+    // instalada + marcada = se va a desinstalar
+    let removing = installed && *on;
+    let clickable = enabled;
     let (rect, resp) = ui.allocate_exact_size(
         vec2(width, 28.0),
         if clickable { Sense::click() } else { Sense::hover() },
@@ -408,8 +410,10 @@ pub(crate) fn app_chip(
     }
     let p = ui.painter();
     let hovered = clickable && resp.hovered();
-    let fill = if installed {
-        mix(PANEL, GREEN, 0.18)
+    let fill = if removing {
+        mix(PANEL, ORANGE, 0.22)
+    } else if installed {
+        mix(PANEL, GREEN, if hovered { 0.28 } else { 0.18 })
     } else if *on {
         mix(PANEL, LIME, 0.22)
     } else if hovered {
@@ -418,13 +422,18 @@ pub(crate) fn app_chip(
         mix(PANEL, DARK, 0.30)
     };
     p.rect_filled(rect, 0.0, fill);
-    let border = if *on { LIME } else if star { YELLOW } else { DARK };
+    let border = if removing { ORANGE } else if *on { LIME } else if star { YELLOW } else { DARK };
     p.rect_stroke(rect, 0.0, Stroke::new(2.0_f32, border));
 
     // casilla
     let b = Rect::from_min_size(pos2(rect.min.x + 7.0, rect.center().y - 6.0), vec2(12.0, 12.0));
     p.rect_filled(b, 0.0, DARK);
-    if installed {
+    if removing {
+        // casilla desmarcada con ✖ naranja: se desinstalará
+        for (x, y) in [(1, 1), (2, 2), (3, 3), (4, 4), (4, 1), (3, 2), (2, 3), (1, 4)] {
+            p.rect_filled(Rect::from_min_size(b.min + vec2(x as f32 * 2.0, y as f32 * 2.0), vec2(2.0, 2.0)), 0.0, ORANGE);
+        }
+    } else if installed {
         // ✔ pixel verde dentro del cuadro oscuro
         for (x, y) in [(1, 3), (2, 4), (3, 3), (4, 2), (5, 1)] {
             p.rect_filled(Rect::from_min_size(b.min + vec2(x as f32 * 2.0, y as f32 * 2.0), vec2(2.0, 2.0)), 0.0, LIME);
@@ -444,7 +453,7 @@ pub(crate) fn app_chip(
     } else {
         name.to_string()
     };
-    let tc = if installed { LIME } else if clickable { TEXT } else { GRAY };
+    let tc = if removing { ORANGE } else if installed { LIME } else if clickable { TEXT } else { GRAY };
     p.text(pos2(b.max.x + 8.0, rect.center().y), Align2::LEFT_CENTER, shown, FontId::monospace(12.0), tc);
 
     let resp = if clickable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
@@ -453,8 +462,10 @@ pub(crate) fn app_chip(
         ui.label(egui::RichText::new(name).color(YELLOW).size(13.0));
         ui.label(egui::RichText::new(desc).color(TEXT).size(12.0));
         ui.label(egui::RichText::new(id).color(DIMGRAY).size(10.0));
-        if installed {
-            ui.label(egui::RichText::new("✔ Ya instalada").color(LIME).size(11.0));
+        if removing {
+            ui.label(egui::RichText::new("✖ Se desinstalará (clic para cancelar)").color(ORANGE).size(11.0));
+        } else if installed {
+            ui.label(egui::RichText::new("✔ Ya instalada · clic para desinstalar").color(LIME).size(11.0));
         }
         if star {
             ui.label(egui::RichText::new("★ Recomendado para tu PC").color(YELLOW).size(11.0));
@@ -478,7 +489,9 @@ pub(crate) fn fold(s: &str) -> String {
         .collect()
 }
 
-pub(crate) fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: &str, search: &mut String, enabled: bool, height: f32) {
+/// Devuelve `true` si se pulsó RECARGAR (volver a detectar lo instalado).
+pub(crate) fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: &str, search: &mut String, enabled: bool, height: f32) -> bool {
+    let mut reload = false;
     let installed = |i: usize| st.get(i) == Some(&Some(true));
     // todas las palabras deben aparecer en nombre, id, descripción o categoría
     let words: Vec<String> = fold(search).split_whitespace().map(String::from).collect();
@@ -491,10 +504,14 @@ pub(crate) fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: 
         .collect();
     pixel_frame(PANEL).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            let n = sel.iter().filter(|&&s| s).count();
+            let del = (0..APPS.len()).filter(|&i| sel[i] && installed(i)).count();
+            let n = sel.iter().filter(|&&s| s).count() - del;
             let inst = (0..APPS.len()).filter(|&i| installed(i)).count();
             ui.label(egui::RichText::new("INSTALAR CON WINGET").color(YELLOW).size(13.0));
             ui.label(egui::RichText::new(format!("{n} marcadas · {inst} instaladas")).color(GRAY).size(11.0));
+            if del > 0 {
+                ui.label(egui::RichText::new(format!("· {del} a desinstalar")).color(ORANGE).size(11.0));
+            }
             ui.add_space(8.0);
             ui.add_enabled_ui(enabled, |ui| {
                 for (pack, ids) in APP_PACKS {
@@ -531,6 +548,13 @@ pub(crate) fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: 
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("BUSCAR").color(CYAN).size(12.0));
+            if ui
+                .add_enabled(enabled, egui::Button::new(egui::RichText::new("RECARGAR").size(11.0)).small())
+                .on_hover_text("Vuelve a comprobar qué apps están instaladas")
+                .clicked()
+            {
+                reload = true;
+            }
             let w = (ui.available_width() - 70.0).max(120.0);
             ui.add(egui::TextEdit::singleline(search).desired_width(w).hint_text("nombre, categoría o id (ej. python, navegador)..."));
             if !search.is_empty() && ui.small_button("✖").on_hover_text("Limpiar búsqueda").clicked() {
@@ -590,6 +614,7 @@ pub(crate) fn apps_list(ui: &mut Ui, sel: &mut [bool], st: &[Option<bool>], hw: 
                 }
             });
     });
+    reload
 }
 
 /// Barra de progreso pixel art: celdas de 4px con brillo arriba y sombra abajo.
