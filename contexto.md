@@ -10,7 +10,7 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
 - Flujo acordado: tras cada cambio, Claude compila, cierra el `KevWinOptimizer` abierto, copia el `.exe` al escritorio y lo abre.
 - Icono: `assets/icon.ico` (monitor pixel art 16x16, varios tamaños) incrustado con `build.rs` + `embed-resource`; el icono de ventana se genera del mismo sprite (`SPR_ICON`).
 - Se auto-eleva a administrador al abrir con la API de Windows (`IsUserAnAdmin` + `ShellExecuteW` "runas"), así que cada apertura pide UAC. El exe lleva VERSIONINFO (assets/app.rc).
-- Versión en `Cargo.toml` (`VERSION` = `CARGO_PKG_VERSION`, se muestra en la cabecera). Actual: **1.1.0**.
+- Versión en `Cargo.toml` (`VERSION` = `CARGO_PKG_VERSION`, se muestra en la cabecera). Actual: **1.1.1**.
 
 ## GitHub y releases
 - Repo: https://github.com/KevshuppDev/KevWinOptimizer (licencia MIT, README en español). Git instalado en `C:\Program Files\Git`; credenciales con Git Credential Manager.
@@ -39,9 +39,13 @@ App de escritorio en Rust + egui/eframe 0.29 (un solo `.exe`, arranque instantá
 - **Presets de tweaks** (PRIVACIDAD y RENDIMIENTO → TWEAKS): MÍNIMO (`PRIV_MIN`, `PERF_MIN`) / ESTÁNDAR (los `default: true`; incluye Modo oscuro) / MÁXIMO (marca todos), NINGUNO y COMO ESTÁ. El preset deja exactamente su selección (lo activo que no esté sale como DESHACER). LIMPIEZA tiene RÁPIDA (`CLEAN_FAST`) / ESTÁNDAR / PROFUNDA (todo) / NINGUNA. En esas listas `check_list(..., buttons=false)` oculta los botones Todas/Ninguna/Recomendadas/Sin cambios. Tweak nuevo en PRIVACIDAD: "Domar Microsoft Edge" (directivas en `HKLM\SOFTWARE\Policies\Microsoft\Edge`). Desinstalar Edge no se hizo (Microsoft lo bloquea fuera de la UE y rompe WebView2).
 - **APPS → INSTALAR**: ~120 apps por categorías (IA y agentes, programación base/lenguajes/herramientas, bases de datos, navegadores, comunicación, multimedia, oficina, utilidades, juegos, runtimes para juegos, drivers, hardware). Todos los IDs se verificaron con `winget show`.
   - Prefijos de id: normal = winget; sin punto = Microsoft Store (`--source msstore`); `vscode:` = extensión de VS Code; `custom:` = instalador propio (Oracle XE 11g desde Google Drive, no oficial); `web:` = abre la web (AMD).
+  - Portables con interfaz (`PORTABLE_GUI`, hoy solo `Oracle.SQLDeveloper`): winget descomprime el zip en `%LOCALAPPDATA%\Microsoft\WinGet\Packages` sin acceso directo; `portable_shortcuts` lo crea en el menú Inicio y el escritorio tras instalar y al detectar apps (si falta el del menú Inicio).
+  - Barra de progreso: winget no emite progreso sin consola, así que dentro de cada paso la barra avanza sola por tiempo (`step_at`, curva que frena hacia el 92 % del paso).
   - Packs (alternan marcar/quitar): Personal, Rust, Web, IA, Oracle, Gamer.
   - **Buscador**: filtra por nombre, categoría, id o descripción (varias palabras, sin importar tildes ni mayúsculas); "todas" de cada categoría solo afecta a lo visible.
-  - Detecta lo instalado: `winget export` + ejecutables en el PATH y carpetas típicas (portables como `C:\mingw64`, `C:\xampp`) + paquetes AppX + extensiones de VS Code. Lo instalado sale bloqueado como INSTALADA.
+  - Detecta lo instalado: `winget export` + ejecutables en el PATH y carpetas típicas (portables como `C:\mingw64`, `C:\xampp`) + paquetes AppX + extensiones de VS Code. Lo instalado sale con ✔ verde.
+  - **Desinstalar**: clic en una instalada la marca en naranja con ✖ (`sel` = acción pendiente: instalar si no está, desinstalar si está). El botón pasa a `Desinstalar (N)` / `Aplicar (+a / -d)` y `apply_apps` primero quita (`winget uninstall`, `code --uninstall-extension`) y luego instala. `custom:` (Oracle XE) no se quita solo: abre `appwiz.cpl`. Packs, "todas" e importar no tocan las instaladas.
+  - Lo instalado se vuelve a detectar con el botón RECARGAR (junto al buscador) y al volver el foco a la ventana estando en APPS (como mucho cada 15 s, `apps_at` / `was_focused`).
   - Detecta GPU/CPU y marca con ★ el driver recomendado (este PC: Intel HD 620 / i5-7300U → Intel DSA).
 - **APPS → QUITAR BLOATWARE**: 34 apps preinstaladas conocidas; solo muestra las presentes, con etiqueta RECOMENDADO para las seguras.
 
