@@ -52,6 +52,11 @@ const OPTS: &[(&str, &str, bool)] = &[
     ("Logs de Windows", "C:\\Windows\\Logs (CBS, DISM...)", true),
     ("Cachés de programación", "cargo, npm, pip, bun, uv, go", true),
     ("Instaladores de drivers", "C:\\NVIDIA, C:\\AMD, C:\\Intel", true),
+    ("Prefetch", "C:\\Windows\\Prefetch (el próximo arranque va algo más lento)", false),
+    ("Caché de shaders", "DirectX, NVIDIA, AMD, Intel (se regenera al jugar)", true),
+    ("Windows.old y restos de actualización", "Ya no podrás volver a la versión anterior de Windows", false),
+    ("Caché de fuentes", "Arregla fuentes que se ven mal (se regenera sola)", false),
+    ("Puntos de restauración viejos", "Borra todos menos el más reciente", false),
 ];
 
 /// Un cambio con script de aplicar y de deshacer (PowerShell).
@@ -127,6 +132,20 @@ const PRIVACY: &[Tweak] = &[
         apply: r"$p='HKLM:\SOFTWARE\Policies\Microsoft\Edge'; SetReg $p HubsSidebarEnabled 0; SetReg $p EdgeShoppingAssistantEnabled 0; SetReg $p StartupBoostEnabled 0; SetReg $p BackgroundModeEnabled 0; SetReg $p ShowRecommendationsEnabled 0; SetReg $p PersonalizationReportingEnabled 0; SetReg $p HideFirstRunExperience 1; SetReg $p EdgeCollectionsEnabled 0; SetReg $p ShowMicrosoftRewards 0",
         undo: r"$p='HKLM:\SOFTWARE\Policies\Microsoft\Edge'; foreach($n in 'HubsSidebarEnabled','EdgeShoppingAssistantEnabled','StartupBoostEnabled','BackgroundModeEnabled','ShowRecommendationsEnabled','PersonalizationReportingEnabled','HideFirstRunExperience','EdgeCollectionsEnabled','ShowMicrosoftRewards'){ DelReg $p $n }",
         default: true,
+    },
+    Tweak {
+        name: "Domar Brave",
+        desc: "Sin Rewards, Wallet, VPN, Leo (IA), noticias ni estadísticas",
+        apply: r"$p='HKLM:\SOFTWARE\Policies\BraveSoftware\Brave'; SetReg $p BraveRewardsDisabled 1; SetReg $p BraveWalletDisabled 1; SetReg $p BraveVPNDisabled 1; SetReg $p BraveAIChatEnabled 0; SetReg $p BraveNewsDisabled 1; SetReg $p BraveStatsPingEnabled 0; SetReg $p BraveP3AEnabled 0",
+        undo: r"$p='HKLM:\SOFTWARE\Policies\BraveSoftware\Brave'; foreach($n in 'BraveRewardsDisabled','BraveWalletDisabled','BraveVPNDisabled','BraveAIChatEnabled','BraveNewsDisabled','BraveStatsPingEnabled','BraveP3AEnabled'){ DelReg $p $n }",
+        default: false,
+    },
+    Tweak {
+        name: "Bloquear telemetría de Adobe",
+        desc: "Bloquea en hosts los servidores de estadísticas de Adobe",
+        apply: r"$h=Join-Path $env:WINDIR 'System32\drivers\etc\hosts'; $l=@(Get-Content $h | Where-Object { $_ -notmatch 'KWO-ADOBE' }); foreach($d in 'cc-api-data.adobe.io','sstats.adobe.com','stats.adobe.com','adobedc.demdex.net','dpm.demdex.net','adobe.tt.omtrdc.net','adobe.com.ssl.d1.sc.omtrdc.net'){ $l += ('0.0.0.0 {0} # KWO-ADOBE' -f $d) }; Set-Content -Path $h -Value $l -Encoding ASCII; ipconfig /flushdns | Out-Null",
+        undo: r"$h=Join-Path $env:WINDIR 'System32\drivers\etc\hosts'; $l=@(Get-Content $h | Where-Object { $_ -notmatch 'KWO-ADOBE' }); Set-Content -Path $h -Value $l -Encoding ASCII; ipconfig /flushdns | Out-Null",
+        default: false,
     },
 ];
 
@@ -228,6 +247,13 @@ const PERF: &[Tweak] = &[
         undo: r"DelReg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' AllowNewsAndInterests",
         default: true,
     },
+    Tweak {
+        name: "Hora UTC (dual boot con Linux)",
+        desc: "Evita que la hora se desfase al cambiar entre Windows y Linux",
+        apply: r"SetReg 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation' RealTimeIsUniversal 1",
+        undo: r"DelReg 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation' RealTimeIsUniversal",
+        default: false,
+    },
 ];
 
 /// Comprobaciones (PowerShell, deben dar $true si el tweak ya está aplicado).
@@ -242,6 +268,8 @@ const PRIVACY_CHECK: &[&str] = &[
     r"(GetReg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' Enabled) -eq 0",
     r"(GetReg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' GlobalUserDisabled) -eq 1",
     r"((GetReg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' HubsSidebarEnabled) -eq 0) -and ((GetReg 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' StartupBoostEnabled) -eq 0)",
+    r"(GetReg 'HKLM:\SOFTWARE\Policies\BraveSoftware\Brave' BraveRewardsDisabled) -eq 1",
+    r"(Get-Content (Join-Path $env:WINDIR 'System32\drivers\etc\hosts') -Raw) -match 'KWO-ADOBE'",
 ];
 const PERF_CHECK: &[&str] = &[
     r"(powercfg /getactivescheme | Out-String) -match 'Ultimate|ximo rendimiento'",
@@ -257,6 +285,7 @@ const PERF_CHECK: &[&str] = &[
     r"(GetReg 'HKCU:\Control Panel\Mouse' MouseSpeed) -eq '0'",
     r"Test-Path 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32'",
     r"(GetReg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' AllowNewsAndInterests) -eq 0",
+    r"(GetReg 'HKLM:\SYSTEM\CurrentControlSet\Control\TimeZoneInformation' RealTimeIsUniversal) -eq 1",
 ];
 
 // ---------- servicios ----------
@@ -273,6 +302,8 @@ struct SvcPack {
 const SVC_PACKS: &[SvcPack] = &[
     SvcPack { name: "Innecesarios de Windows", desc: "Fax, mapas, demo de tienda, Insider, control parental, Wallet...", rec: true,
         pats: &["Fax", "MapsBroker", "RetailDemo", "WMPNetworkSvc", "PhoneSvc", "RemoteRegistry", "WpcMonSvc", "SEMgrSvc", "WalletService", "wisvc"] },
+    SvcPack { name: "A manual (estilo WinUtil)", desc: "Seguimiento de enlaces, Wi-Fi compartido, ubicación, compatibilidad, informes, tarjetas inteligentes. Arrancan solos si hacen falta", rec: false,
+        pats: &["AJRouter", "ALG", "lfsvc", "PcaSvc", "SharedAccess", "TrkWks", "WerSvc", "wercplsupport", "SCardSvr", "ScDeviceEnum", "diagnosticshub.standardcollector.service", "DiagTrack"] },
     SvcPack { name: "Actualizadores de apps", desc: "Google, Edge, Adobe, Firefox, Brave. Se siguen actualizando al abrirlas", rec: true,
         pats: &["gupdate*", "GoogleUpdater*", "edgeupdate*", "AdobeARMservice", "MozillaMaintenance", "brave*"] },
     SvcPack { name: "Intel (telemetría)", desc: "Driver & Support Assistant y reportes de uso", rec: true,
@@ -1067,16 +1098,105 @@ enum Tab {
     Config,
 }
 
-const TABS: [(Tab, &str); 8] = [
-    (Tab::Limpieza, "LIMPIEZA"),
-    (Tab::Red, "RED"),
-    (Tab::Privacidad, "PRIVACIDAD"),
-    (Tab::Rendimiento, "RENDIMIENTO"),
-    (Tab::Reparar, "REPARAR"),
+/// Modo avanzado: 7 pestañas. AJUSTES = privacidad + rendimiento (Tab::Rendimiento);
+/// LIMPIAR incluye espacio en disco y archivos grandes; REPARAR, diagnóstico y drivers.
+const TABS: [(Tab, &str); 7] = [
+    (Tab::Limpieza, "LIMPIAR"),
+    (Tab::Rendimiento, "AJUSTES"),
     (Tab::Apps, "APPS"),
+    (Tab::Red, "RED"),
+    (Tab::Reparar, "REPARAR"),
     (Tab::Sistema, "SISTEMA"),
     (Tab::Config, "CONFIG"),
 ];
+
+/// Subpestañas de AJUSTES (perf_view).
+const PERF_VIEWS: [(u8, &str); 5] = [(4, "PRIVACIDAD"), (0, "TWEAKS"), (1, "INICIO"), (2, "SERVICIOS"), (3, "ENERGÍA")];
+/// Subpestañas de LIMPIAR (clean_view): 0 = tareas, 1 = espacio (sistema 1), 2 = grandes (sistema 6).
+const CLEAN_VIEWS: [(u8, &str); 3] = [(0, "TAREAS"), (1, "ESPACIO EN DISCO"), (2, "ARCHIVOS GRANDES")];
+/// Subpestañas de REPARAR (fix_view): 0 = herramientas, 1 = diagnóstico (sistema 3), 2 = drivers (sistema 4).
+const FIX_VIEWS: [(u8, &str); 3] = [(0, "HERRAMIENTAS"), (1, "DIAGNÓSTICO"), (2, "DRIVERS")];
+/// SISTEMA en modo avanzado (lo demás se movió) y en modo simple (MI EQUIPO, todo).
+const SYS_VIEWS: [(u8, &str); 3] = [(0, "EQUIPO"), (2, "BATERÍA"), (5, "RESPALDO")];
+const SYS_VIEWS_SIMPLE: [(u8, &str); 6] = [(0, "EQUIPO"), (1, "ESPACIO EN DISCO"), (2, "BATERÍA"), (3, "DIAGNÓSTICO"), (4, "DRIVERS"), (5, "RESPALDO")];
+
+/// Resultado del buscador global: (texto, dónde está, pestaña, subpestaña, es app).
+type Hit = (String, &'static str, Tab, u8, bool);
+
+fn search_hits(q: &str) -> Vec<Hit> {
+    let words: Vec<String> = fold(q).split_whitespace().map(String::from).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut all: Vec<(String, String, &'static str, Tab, u8, bool)> = Vec::new();
+    let mut push = |name: &str, desc: &str, place: &'static str, t: Tab, v: u8, app: bool| {
+        all.push((name.to_string(), format!("{name} {desc} {place}"), place, t, v, app));
+    };
+    const FIXED: &[(&str, &str, &str, Tab, u8)] = &[
+        ("Servidores DNS", "cloudflare google 1.1.1.1 8.8.8.8", "RED", Tab::Red, 0),
+        ("Conexiones y VPN", "adaptadores wifi ethernet warp radmin", "RED", Tab::Red, 0),
+        ("Red rápida / completa", "internet ip winsock reiniciar red", "RED", Tab::Red, 0),
+        ("Espacio en disco", "analizador carpetas ocupan", "LIMPIAR", Tab::Limpieza, 1),
+        ("Archivos grandes", "pesados descargas duplicados", "LIMPIAR", Tab::Limpieza, 2),
+        ("Programas de inicio", "arranque startup", "AJUSTES", Tab::Rendimiento, 1),
+        ("Servicios", "detener manual winutil", "AJUSTES", Tab::Rendimiento, 2),
+        ("Energía y paginación", "plan de energía pagefile memoria virtual almacenamiento reservado", "AJUSTES", Tab::Rendimiento, 3),
+        ("Diagnóstico", "problemas arreglar sonido impresión hora defender", "REPARAR", Tab::Reparar, 1),
+        ("Drivers e impresoras", "controladores epson xerox impresora", "REPARAR", Tab::Reparar, 2),
+        ("Información del equipo", "cpu gpu ram discos salud temperatura", "SISTEMA", Tab::Sistema, 0),
+        ("Batería", "salud ciclos battery report", "SISTEMA", Tab::Sistema, 2),
+        ("Respaldo antes de formatear", "backup wifi clave windows restaurar", "SISTEMA", Tab::Sistema, 5),
+        ("Actualizar apps", "winget upgrade", "APPS", Tab::Apps, 2),
+        ("Quitar bloatware", "desinstalar preinstaladas", "APPS", Tab::Apps, 1),
+        ("Bandeja y limpieza programada", "arrancar con windows automática", "CONFIG", Tab::Config, 0),
+        ("Historial de cambios", "deshacer registro", "CONFIG", Tab::Config, 1),
+    ];
+    for (n, d, p, t, v) in FIXED {
+        push(n, d, p, *t, *v, false);
+    }
+    for o in OPTS {
+        push(o.0, o.1, "LIMPIAR", Tab::Limpieza, 0, false);
+    }
+    for t in PRIVACY {
+        push(t.name, t.desc, "AJUSTES › PRIVACIDAD", Tab::Rendimiento, 4, false);
+    }
+    for t in PERF {
+        push(t.name, t.desc, "AJUSTES › TWEAKS", Tab::Rendimiento, 0, false);
+    }
+    for s in SVC_PACKS {
+        push(s.name, s.desc, "AJUSTES › SERVICIOS", Tab::Rendimiento, 2, false);
+    }
+    for t in REPAIRS {
+        push(t.name, t.desc, "REPARAR", Tab::Reparar, 0, false);
+    }
+    for (n, _, d) in PANELS {
+        push(n, d, "REPARAR", Tab::Reparar, 0, false);
+    }
+    for a in APPS {
+        push(a.1, &format!("{} {}", a.0, a.3), "APPS", Tab::Apps, 0, true);
+    }
+    all.into_iter()
+        .filter(|(_, hay, ..)| {
+            let h = fold(hay);
+            words.iter().all(|w| h.contains(w.as_str()))
+        })
+        .take(12)
+        .map(|(n, _, p, t, v, app)| (n, p, t, v, app))
+        .collect()
+}
+
+/// Barra de subpestañas.
+fn subtabs(ui: &mut Ui, cur: &mut u8, views: &[(u8, &str)]) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (v, name) in views {
+            if pixel_tab(ui, name, *cur == *v).clicked() {
+                *cur = *v;
+            }
+        }
+    });
+    ui.add_space(8.0);
+}
 
 /// Pestañas del modo simple: lo seguro y APPS completo.
 const TABS_SIMPLE: [(Tab, &str); 4] = [
@@ -1151,6 +1271,15 @@ struct App {
     bloat_loaded: bool,
     /// Rendimiento: 0 = tweaks, 1 = programas de inicio, 2 = servicios.
     perf_view: u8,
+    clean_view: u8,
+    fix_view: u8,
+    /// CONFIG: 0 = general, 1 = historial.
+    config_view: u8,
+    hist: Vec<String>,
+    /// Tweaks de la tarea en curso, para el historial ("+a;b/-c").
+    hist_extra: String,
+    /// Buscador global de la cabecera.
+    search: String,
     svc: Vec<SvcInfo>,
     svc_rx: Option<Receiver<Vec<SvcInfo>>>,
     svc_loaded: bool,
@@ -1237,6 +1366,7 @@ impl App {
             ..Default::default()
         };
         app.start_hidden = std::env::args().any(|a| a == "--tray");
+        app.perf_view = 4;
         app.cfg = Arc::new(Mutex::new(Config::load()));
         if app.cfg.lock().unwrap().simple {
             app.tab = Tab::Inicio;
@@ -1582,7 +1712,58 @@ impl App {
         });
     }
 
+    fn hist_ui(&mut self, ui: &mut Ui, enabled: bool) {
+        if self.hist.is_empty() {
+            self.hist = hist_load();
+        }
+        let mut undo: Option<(Vec<&'static Tweak>, Vec<&'static Tweak>)> = None;
+        pixel_frame(PANEL).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("HISTORIAL DE CAMBIOS").color(YELLOW).size(13.0));
+                if pixel_small(ui, "ABRIR ARCHIVO", GRAY, hist_path().exists()).clicked() {
+                    let _ = Command::new("notepad").arg(hist_path()).spawn();
+                }
+            });
+            note(ui, "Lo que hizo la app, lo más reciente arriba. Los tweaks se pueden deshacer.");
+            let h = ui.available_height() - 20.0;
+            egui::ScrollArea::vertical().id_salt("hist").max_height(h.max(100.0)).auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                for line in self.hist.iter().rev() {
+                    let p: Vec<&str> = line.splitn(4, '|').collect();
+                    let (date, task, sum, extra) = (p.first().copied().unwrap_or(""), p.get(1).copied().unwrap_or(""), p.get(2).copied().unwrap_or(""), p.get(3).copied().unwrap_or(""));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new(date).color(GRAY).monospace().size(12.0));
+                        ui.label(egui::RichText::new(task).color(LIME).size(12.0));
+                        if !sum.is_empty() {
+                            ui.label(egui::RichText::new(sum).color(TEXT).size(12.0));
+                        }
+                        if let Some(rev) = tweak_revert(extra) {
+                            let tip = extra.replace("/-", "\nDeshechos: ").replace('+', "Aplicados: ").replace(';', ", ");
+                            if pixel_small(ui, "DESHACER", ORANGE, enabled).on_hover_text(tip).clicked() {
+                                undo = Some(rev);
+                            }
+                        }
+                    });
+                }
+                if self.hist.is_empty() {
+                    note(ui, "Todavía no hay nada.");
+                }
+            });
+        });
+        if let Some((apply, undo)) = undo {
+            self.hist_extra = tweak_extra(&apply, &undo);
+            let ctx = ui.ctx().clone();
+            self.start(&ctx, "Aplicar tweaks", move |r| run_changes(r, &apply, &undo));
+        }
+    }
+
     fn config_ui(&mut self, ui: &mut Ui, enabled: bool) {
+        subtabs(ui, &mut self.config_view, &[(0, "GENERAL"), (1, "HISTORIAL")]);
+        if self.config_view == 1 {
+            self.hist_ui(ui, enabled);
+            return;
+        }
         if let Some(Ok(res)) = self.autostart_rx.as_ref().map(|r| r.try_recv()) {
             self.autostart_rx = None;
             match res {
@@ -1717,6 +1898,9 @@ impl App {
         self.progress = None;
         self.step_at = None;
         self.task = name;
+        if name != "Aplicar tweaks" {
+            self.hist_extra.clear();
+        }
         self.show_log = true; // el registro se abre solo al empezar una tarea
         self.started = Some(Instant::now());
         self.elapsed = None;
@@ -1790,6 +1974,9 @@ impl App {
                 self.progress = Some((n, n));
             }
             self.elapsed = self.started.map(|s| s.elapsed());
+            let summary: Vec<String> = self.stats.iter().map(|(n, v)| format!("{n}: {v}")).collect();
+            hist_add(self.task, &summary.join(", "), &std::mem::take(&mut self.hist_extra));
+            self.hist = hist_load();
             self.refresh_status(ctx);
             if matches!(self.task, "Instalar apps" | "Actualizar apps") {
                 self.upg.invalidate();
@@ -1819,12 +2006,68 @@ impl App {
         }
     }
 
+    /// Diagnóstico, drivers y respaldo (subpestañas 3-5 de sistema): ejecuta su acción.
+    fn sys_actions(&mut self, ui: &mut Ui, ctx: &egui::Context, enabled: bool) {
+                let act = match self.sys.view {
+                    3 => self.diag.diag_ui(ui, ctx, enabled),
+                    4 => self.diag.drivers_ui(ui, ctx, enabled),
+                    5 => self.diag.backup_ui(ui, enabled),
+                    _ => None,
+                };
+                let act = match act {
+                    Some(diagnostico::Action::Backup2) => {
+                        let (txt, _) = actualizar::list_text(&self.sel_apps, &self.st_apps);
+                        self.start(ctx, "Respaldo", move |r| diagnostico::full_backup(r, txt));
+                        None
+                    }
+                    Some(diagnostico::Action::Restore(dir)) => {
+                        // marcar las apps aquí (estado de la UI) y el resto en segundo plano
+                        let apps = actualizar::import(&dir.join("apps.txt"), &mut self.sel_apps, &self.st_apps);
+                        self.start(ctx, "Respaldo", move |r| {
+                            match apps {
+                                Ok((n, _)) => r.say(Kind::Ok, format!("{n} apps marcadas para instalar")),
+                                Err(e) => r.say(Kind::Dim, format!("Apps: {e}")),
+                            }
+                            diagnostico::restore(r, &dir)
+                        });
+                        None
+                    }
+                    Some(diagnostico::Action::TestPage(p)) => {
+                        self.start(ctx, "Drivers", move |r| diagnostico::test_page(r, &p));
+                        None
+                    }
+                    Some(diagnostico::Action::SetDefault(p)) => {
+                        self.start(ctx, "Drivers", move |r| diagnostico::set_default(r, &p));
+                        None
+                    }
+                    Some(diagnostico::Action::RemovePrinters(v)) => {
+                        self.start(ctx, "Drivers", move |r| diagnostico::remove_printers(r, &v));
+                        None
+                    }
+                    a => a,
+                };
+                match act {
+                Some(diagnostico::Action::Fix(v)) => self.start(ctx, "Diagnóstico", move |r| diagnostico::fix(r, &v)),
+                Some(diagnostico::Action::Scan) => self.start(ctx, "Drivers", diagnostico::scan_devices),
+                Some(diagnostico::Action::Backup) => self.start(ctx, "Drivers", diagnostico::backup_drivers),
+                Some(diagnostico::Action::Epson) => self.start(ctx, "Drivers", diagnostico::install_epson),
+                Some(diagnostico::Action::Xerox) => self.start(ctx, "Drivers", diagnostico::install_xerox),
+                _ => {}
+                }
+    }
+
     /// Contenido de la pestaña activa.
     fn tab_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, enabled: bool) {
-        let list_h = ui.available_height() - 150.0;
         let bw = 230.0;
         match self.tab {
             Tab::Limpieza => {
+                subtabs(ui, &mut self.clean_view, &CLEAN_VIEWS);
+                if self.clean_view != 0 {
+                    self.sys.view = if self.clean_view == 1 { 1 } else { 6 };
+                    self.sys.ui(ui, ctx, &[]);
+                    return;
+                }
+                let list_h = ui.available_height() - 150.0;
                 let items: Vec<_> = OPTS.iter().map(|o| (o.0, o.1)).collect();
                 let defs: Vec<_> = OPTS.iter().map(|o| o.2).collect();
                 ui.horizontal_wrapped(|ui| {
@@ -1850,10 +2093,19 @@ impl App {
                 check_list(ui, "TAREAS DE LIMPIEZA", &items, &mut self.sel_clean, Some(&defs), None, enabled, 2, list_h, false);
                 ui.add_space(10.0);
                 let any = self.sel_clean.contains(&true);
-                if pixel_button(ui, bw, Some(&SPR_BROOM), "Optimizar", GREEN, enabled && any).clicked() {
-                    let sel = self.sel_clean.clone();
-                    self.start(ctx, "Optimizar", move |r| optimizar(r, &sel));
-                }
+                ui.horizontal(|ui| {
+                    if pixel_button(ui, bw, Some(&SPR_BROOM), "Optimizar", GREEN, enabled && any).clicked() {
+                        let sel = self.sel_clean.clone();
+                        self.start(ctx, "Optimizar", move |r| optimizar(r, &sel));
+                    }
+                    if pixel_button(ui, bw, Some(&SPR_CHECK), "Un clic: recomendada", BLUE, enabled)
+                        .on_hover_text("Limpia lo recomendado sin mirar las casillas")
+                        .clicked()
+                    {
+                        let sel = defs.clone();
+                        self.start(ctx, "Optimizar", move |r| optimizar(r, &sel));
+                    }
+                });
                 note(ui, "Los archivos en uso se saltan; es normal.");
             }
             Tab::Red => {
@@ -1898,16 +2150,12 @@ impl App {
                 });
             }
             Tab::Privacidad | Tab::Rendimiento => {
-                if self.tab == Tab::Rendimiento {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        for (v, name) in [(0u8, "TWEAKS"), (1, "INICIO"), (2, "SERVICIOS"), (3, "ENERGÍA")] {
-                            if pixel_tab(ui, name, self.perf_view == v).clicked() {
-                                self.perf_view = v;
-                            }
-                        }
-                    });
-                    ui.add_space(8.0);
+                if self.tab == Tab::Privacidad {
+                    self.tab = Tab::Rendimiento;
+                    self.perf_view = 4;
+                }
+                {
+                    subtabs(ui, &mut self.perf_view, &PERF_VIEWS);
                     match self.perf_view {
                         1 => {
                             let h = ui.available_height() - 150.0;
@@ -1930,7 +2178,7 @@ impl App {
                         _ => {}
                     }
                 }
-                let (list, title, sel, st) = if self.tab == Tab::Privacidad {
+                let (list, title, sel, st) = if self.perf_view == 4 {
                     (PRIVACY, "TWEAKS DE PRIVACIDAD", &mut self.sel_priv, &self.st_priv)
                 } else {
                     (PERF, "TWEAKS DE RENDIMIENTO", &mut self.sel_perf, &self.st_perf)
@@ -1987,7 +2235,23 @@ impl App {
                 let enabled = enabled && !checking;
                 ui.add_space(10.0);
                 let label = if n == 0 { "Sin cambios".to_string() } else { format!("Aplicar cambios ({n})") };
-                if pixel_button(ui, 260.0, Some(&SPR_CHECK), &label, GREEN, enabled && n > 0).clicked() {
+                // un clic: aplica los recomendados que falten, sin deshacer nada
+                let rec: Vec<&'static Tweak> = list.iter().zip(st.iter()).filter(|(t, s)| t.default && **s != Some(true)).map(|(t, _)| t).collect();
+                let mut go: Option<(Vec<&'static Tweak>, Vec<&'static Tweak>)> = None;
+                ui.horizontal(|ui| {
+                    if pixel_button(ui, 260.0, Some(&SPR_CHECK), &label, GREEN, enabled && n > 0).clicked() {
+                        go = Some((apply, undo));
+                    }
+                    let l2 = if rec.is_empty() { "Recomendados: listo".to_string() } else { format!("Un clic: recomendados ({})", rec.len()) };
+                    if pixel_button(ui, 260.0, Some(&SPR_CHECK), &l2, BLUE, enabled && !rec.is_empty())
+                        .on_hover_text("Aplica los recomendados que falten (no deshace nada)")
+                        .clicked()
+                    {
+                        go = Some((rec, Vec::new()));
+                    }
+                });
+                if let Some((apply, undo)) = go {
+                    self.hist_extra = tweak_extra(&apply, &undo);
                     self.start(ctx, "Aplicar tweaks", move |r| run_changes(r, &apply, &undo));
                 }
                 if checking {
@@ -1997,6 +2261,14 @@ impl App {
                 }
             }
             Tab::Reparar => {
+                subtabs(ui, &mut self.fix_view, &FIX_VIEWS);
+                if self.fix_view != 0 {
+                    self.sys.view = if self.fix_view == 1 { 3 } else { 4 };
+                    self.sys.ui(ui, ctx, &[]);
+                    self.sys_actions(ui, ctx, enabled);
+                    return;
+                }
+                let list_h = ui.available_height() - 150.0;
                 check_list(ui, "HERRAMIENTAS DE REPARACIÓN", &tweak_items(REPAIRS), &mut self.sel_fix, Some(&tweak_defaults(REPAIRS)), None, enabled, 2, list_h - 70.0, true);
                 ui.add_space(10.0);
                 let any = self.sel_fix.contains(&true);
@@ -2017,53 +2289,9 @@ impl App {
             }
             Tab::Config => self.config_ui(ui, enabled),
             Tab::Sistema => {
-                self.sys.ui(ui, ctx);
-                let act = match self.sys.view {
-                    3 => self.diag.diag_ui(ui, ctx, enabled),
-                    4 => self.diag.drivers_ui(ui, ctx, enabled),
-                    5 => self.diag.backup_ui(ui, enabled),
-                    _ => None,
-                };
-                let act = match act {
-                    Some(diagnostico::Action::Backup2) => {
-                        let (txt, _) = actualizar::list_text(&self.sel_apps, &self.st_apps);
-                        self.start(ctx, "Respaldo", move |r| diagnostico::full_backup(r, txt));
-                        None
-                    }
-                    Some(diagnostico::Action::Restore(dir)) => {
-                        // marcar las apps aquí (estado de la UI) y el resto en segundo plano
-                        let apps = actualizar::import(&dir.join("apps.txt"), &mut self.sel_apps, &self.st_apps);
-                        self.start(ctx, "Respaldo", move |r| {
-                            match apps {
-                                Ok((n, _)) => r.say(Kind::Ok, format!("{n} apps marcadas para instalar")),
-                                Err(e) => r.say(Kind::Dim, format!("Apps: {e}")),
-                            }
-                            diagnostico::restore(r, &dir)
-                        });
-                        None
-                    }
-                    Some(diagnostico::Action::TestPage(p)) => {
-                        self.start(ctx, "Drivers", move |r| diagnostico::test_page(r, &p));
-                        None
-                    }
-                    Some(diagnostico::Action::SetDefault(p)) => {
-                        self.start(ctx, "Drivers", move |r| diagnostico::set_default(r, &p));
-                        None
-                    }
-                    Some(diagnostico::Action::RemovePrinters(v)) => {
-                        self.start(ctx, "Drivers", move |r| diagnostico::remove_printers(r, &v));
-                        None
-                    }
-                    a => a,
-                };
-                match act {
-                Some(diagnostico::Action::Fix(v)) => self.start(ctx, "Diagnóstico", move |r| diagnostico::fix(r, &v)),
-                Some(diagnostico::Action::Scan) => self.start(ctx, "Drivers", diagnostico::scan_devices),
-                Some(diagnostico::Action::Backup) => self.start(ctx, "Drivers", diagnostico::backup_drivers),
-                Some(diagnostico::Action::Epson) => self.start(ctx, "Drivers", diagnostico::install_epson),
-                Some(diagnostico::Action::Xerox) => self.start(ctx, "Drivers", diagnostico::install_xerox),
-                _ => {}
-                }
+                let simple = self.cfg.lock().unwrap().simple;
+                self.sys.ui(ui, ctx, if simple { &SYS_VIEWS_SIMPLE[..] } else { &SYS_VIEWS[..] });
+                self.sys_actions(ui, ctx, enabled);
             }
             Tab::Inicio => self.simple_ui(ui, ctx, enabled),
             Tab::Apps => {
@@ -2232,6 +2460,62 @@ impl eframe::App for App {
                             g.simple = !simple;
                             g.save();
                             self.tab = if g.simple { Tab::Inicio } else { Tab::Limpieza };
+                        }
+                        if !simple {
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.search)
+                                    .hint_text("🔍 Buscar ajuste o app...")
+                                    .desired_width(220.0),
+                            );
+                            let hits = search_hits(&self.search);
+                            if !self.search.trim().is_empty() {
+                                let mut go: Option<Hit> = None;
+                                egui::Area::new(egui::Id::new("search_hits"))
+                                    .order(egui::Order::Foreground)
+                                    .fixed_pos(resp.rect.left_bottom() + vec2(-160.0, 4.0))
+                                    .show(ctx, |ui| {
+                                        pixel_frame(PANEL).show(ui, |ui| {
+                                            ui.set_width(380.0);
+                                            if hits.is_empty() {
+                                                note(ui, "Sin resultados.");
+                                            }
+                                            for h in &hits {
+                                                ui.horizontal(|ui| {
+                                                    if pixel_small(ui, "IR", BLUE, true).clicked() {
+                                                        go = Some(h.clone());
+                                                    }
+                                                    ui.label(egui::RichText::new(&h.0).color(TEXT).size(12.0));
+                                                    ui.label(egui::RichText::new(h.1).color(GRAY).size(11.0));
+                                                });
+                                            }
+                                            if pixel_small(ui, "CERRAR", GRAY, true).clicked() {
+                                                self.search.clear();
+                                            }
+                                        });
+                                    });
+                                // Enter = primer resultado
+                                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    go = hits.first().cloned();
+                                }
+                                if let Some((name, _, t, v, app)) = go {
+                                    self.tab = t;
+                                    match t {
+                                        Tab::Limpieza => self.clean_view = v,
+                                        Tab::Rendimiento => self.perf_view = v,
+                                        Tab::Reparar => self.fix_view = v,
+                                        Tab::Sistema => self.sys.view = v,
+                                        Tab::Config => self.config_view = v,
+                                        Tab::Apps => {
+                                            self.apps_view = v;
+                                            if app {
+                                                self.app_search = name;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    self.search.clear();
+                                }
+                            }
                         }
                         if let Some(tag) = self.upd.clone() {
                             if pixel_small(ui, &format!("NUEVA VERSIÓN {tag}"), LIME, true)
@@ -2518,6 +2802,55 @@ fn optimizar(r: &Rep, sel: &[bool]) {
                 for d in [r"C:\NVIDIA", r"C:\AMD", r"C:\Intel"] {
                     add(PathBuf::from(d));
                 }
+            }
+            15 => add(windir.join("Prefetch")),
+            16 => {
+                let home = env("USERPROFILE", r"C:\Users\Default");
+                for d in [
+                    local.join("D3DSCache"),
+                    local.join(r"NVIDIA\DXCache"),
+                    local.join(r"NVIDIA\GLCache"),
+                    local.join(r"AMD\DxCache"),
+                    local.join(r"AMD\DxcCache"),
+                    local.join(r"AMD\GLCache"),
+                    local.join(r"AMD\VkCache"),
+                    home.join(r"AppData\LocalLow\NVIDIA\PerDriverVersion\DXCache"),
+                    home.join(r"AppData\LocalLow\Intel\ShaderCache"),
+                ] {
+                    add(d);
+                }
+            }
+            17 => {
+                // lo hace el Liberador de espacio de Windows (Windows.old tiene permisos de TrustedInstaller)
+                let before = free_bytes();
+                let script = r"$k='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'; foreach($n in 'Previous Installations','Temporary Setup Files','Windows Upgrade Log Files','Windows ESD installation files','Update Cleanup'){ $p=Join-Path $k $n; if(Test-Path $p){ Set-ItemProperty -Path $p -Name StateFlags0077 -Value 2 -Type DWord } }";
+                ps(script);
+                r.say(Kind::Dim, "      Liberador de espacio de Windows trabajando (puede tardar)...");
+                run_status("cleanmgr", &["/sagerun:77"]);
+                freed = Some(free_bytes().zip(before).map(|(a, b)| a.saturating_sub(b)).unwrap_or(0));
+            }
+            18 => {
+                run_silent("net", &["stop", "FontCache", "/y"]);
+                add(windir.join(r"ServiceProfiles\LocalService\AppData\Local\FontCache"));
+                let dat = windir.join(r"System32\FNTCACHE.DAT");
+                let len = std::fs::metadata(&dat).map(|m| m.len()).unwrap_or(0);
+                if std::fs::remove_file(&dat).is_ok() {
+                    if let Some(f) = freed.as_mut() {
+                        *f += len;
+                    }
+                }
+                run_silent("net", &["start", "FontCache"]);
+            }
+            19 => {
+                let (_, out) = ps("$s=@(Get-CimInstance Win32_ShadowCopy | Sort-Object InstallDate); $n=$s.Count; if($n -gt 1){ $s | Select-Object -First ($n-1) | Remove-CimInstance }; 'QUEDAN|' + [math]::Min($n,1) + '|' + [math]::Max($n-1,0)");
+                match out.iter().find_map(|l| l.strip_prefix("QUEDAN|")) {
+                    Some(v) => {
+                        let p: Vec<&str> = v.split('|').collect();
+                        r.say(Kind::Dim, format!("      Borrados {} puntos, queda {}", p.get(1).unwrap_or(&"0"), p.first().unwrap_or(&"0")));
+                    }
+                    None => r.say(Kind::Dim, "      No se pudieron leer los puntos de restauración"),
+                }
+                freed = None;
             }
             11 => {
                 r.say(Kind::Dim, "      Esto puede tardar, no cierres la app...");
@@ -2941,6 +3274,51 @@ fn run_output(cmd: &str, args: &[&str]) -> Vec<String> {
 fn free_gb() -> Option<f64> {
     let out = run_output("powershell", &["-NoProfile", "-Command", "(Get-PSDrive C).Free"]);
     out.first()?.trim().parse::<f64>().ok().map(|b| b / 1_073_741_824.0)
+}
+
+fn free_bytes() -> Option<u64> {
+    let out = run_output("powershell", &["-NoProfile", "-Command", "(Get-PSDrive C).Free"]);
+    out.first()?.trim().parse::<u64>().ok()
+}
+
+/// Historial de lo que hizo la app: `%APPDATA%\KevWinOptimizer\historial.txt`.
+fn hist_path() -> PathBuf {
+    PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join(r"KevWinOptimizer\historial.txt")
+}
+
+/// Cada línea: fecha|tarea|resumen|tweaks (+a;b/-c, vacío si no aplica).
+fn hist_load() -> Vec<String> {
+    std::fs::read_to_string(hist_path()).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(String::from).collect()
+}
+
+fn hist_add(task: &str, summary: &str, extra: &str) {
+    let mut v = hist_load();
+    v.push(format!("{}|{task}|{}|{extra}", fondo::local_now().text, summary.replace('|', "/")));
+    let start = v.len().saturating_sub(200);
+    let p = hist_path();
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(p, v[start..].join("\n") + "\n");
+}
+
+fn find_tweak(name: &str) -> Option<&'static Tweak> {
+    PRIVACY.iter().chain(PERF.iter()).find(|t| t.name == name)
+}
+
+/// "+a;b/-c" de los tweaks aplicados y deshechos.
+fn tweak_extra(apply: &[&Tweak], undo: &[&Tweak]) -> String {
+    let a: Vec<&str> = apply.iter().map(|t| t.name).collect();
+    let u: Vec<&str> = undo.iter().map(|t| t.name).collect();
+    format!("+{}/-{}", a.join(";"), u.join(";"))
+}
+
+/// Lo contrario de un "+a;b/-c": (aplicar, deshacer) para revertirlo.
+fn tweak_revert(extra: &str) -> Option<(Vec<&'static Tweak>, Vec<&'static Tweak>)> {
+    let (plus, minus) = extra.strip_prefix('+')?.split_once("/-")?;
+    let names = |s: &str| -> Vec<&'static Tweak> { s.split(';').filter(|n| !n.is_empty()).filter_map(find_tweak).collect() };
+    let (re_apply, re_undo) = (names(minus), names(plus));
+    (!re_apply.is_empty() || !re_undo.is_empty()).then_some((re_apply, re_undo))
 }
 
 /// Borra el contenido de `dir` (no la carpeta). Devuelve bytes liberados.

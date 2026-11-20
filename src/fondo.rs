@@ -208,6 +208,64 @@ pub fn show_window() {
     }
 }
 
+// ---------------------------------------------------------------------
+//  Monitor de la bandeja: CPU y RAM (API de Windows, sin PowerShell)
+// ---------------------------------------------------------------------
+
+static CPU_PCT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn ft(f: &windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64
+}
+
+/// (idle, total) acumulados desde el arranque.
+fn cpu_times() -> Option<(u64, u64)> {
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let (mut i, mut k, mut u) = unsafe { std::mem::zeroed() };
+    if unsafe { GetSystemTimes(&mut i, &mut k, &mut u) } == 0 {
+        return None;
+    }
+    // el tiempo de kernel ya incluye el de inactividad
+    Some((ft(&i), ft(&k) + ft(&u)))
+}
+
+/// (% usada, GB usados, GB totales)
+fn ram() -> Option<(u32, f64, f64)> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return None;
+    }
+    let g = 1_073_741_824.0;
+    Some((m.dwMemoryLoad, (m.ullTotalPhys - m.ullAvailPhys) as f64 / g, m.ullTotalPhys as f64 / g))
+}
+
+/// Hilo que mide la CPU cada 2 s.
+fn start_cpu_monitor() {
+    thread::spawn(|| {
+        let mut last = cpu_times();
+        loop {
+            thread::sleep(Duration::from_secs(2));
+            let now = cpu_times();
+            if let (Some((i0, t0)), Some((i1, t1))) = (last, now) {
+                let dt = t1.saturating_sub(t0).max(1);
+                let busy = dt.saturating_sub(i1.saturating_sub(i0));
+                CPU_PCT.store((busy * 100 / dt) as u32, Ordering::Relaxed);
+            }
+            last = now;
+        }
+    });
+}
+
+fn tray_text() -> String {
+    let cpu = CPU_PCT.load(Ordering::Relaxed);
+    match ram() {
+        Some((p, u, t)) => format!("KevWinOptimizer\nCPU: {cpu} %\nRAM: {p} % ({u:.1} / {t:.1} GB)"),
+        None => format!("KevWinOptimizer\nCPU: {cpu} %"),
+    }
+}
+
 fn quit() {
     TRAY.with(|t| t.borrow_mut().take());
     std::process::exit(0);
@@ -242,7 +300,17 @@ pub fn create_tray(ctx: &eframe::egui::Context, icon: &eframe::egui::IconData) -
     let Ok(tray) = tray else { return false };
     TRAY.with(|t| *t.borrow_mut() = Some(tray));
 
+    start_cpu_monitor();
     TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| {
+        // al pasar el ratón: actualizar CPU / RAM en el texto del icono
+        if let TrayIconEvent::Enter { .. } | TrayIconEvent::Move { .. } = e {
+            let txt = tray_text();
+            TRAY.with(|t| {
+                if let Some(t) = t.borrow().as_ref() {
+                    let _ = t.set_tooltip(Some(txt));
+                }
+            });
+        }
         if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
         | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = e
         {

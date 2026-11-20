@@ -105,6 +105,31 @@ fn walk(p: &Path, depth: u32, map: &mut HashMap<PathBuf, Vec<Entry>>, count: &At
     total
 }
 
+/// Archivos grandes: los MAX_BIG más pesados por encima de BIG_MIN bajo `p`.
+const BIG_MIN: u64 = 100 * 1_048_576;
+const MAX_BIG: usize = 80;
+
+fn walk_big(p: &Path, out: &mut Vec<(PathBuf, u64)>, count: &AtomicU64) {
+    let Ok(rd) = std::fs::read_dir(p) else { return };
+    for e in rd.flatten() {
+        let Ok(m) = e.metadata() else { continue };
+        if m.is_dir() {
+            if m.file_attributes() & 0x400 == 0 {
+                walk_big(&e.path(), out, count);
+            }
+        } else {
+            count.fetch_add(1, Ordering::Relaxed);
+            if m.len() >= BIG_MIN {
+                out.push((e.path(), m.len()));
+                if out.len() > MAX_BIG * 2 {
+                    out.sort_by(|a, b| b.1.cmp(&a.1));
+                    out.truncate(MAX_BIG);
+                }
+            }
+        }
+    }
+}
+
 fn scan(root: PathBuf, count: Arc<AtomicU64>) -> Scan {
     let t = std::time::Instant::now();
     let mut dirs = HashMap::new();
@@ -129,6 +154,9 @@ pub struct State {
     cur: PathBuf,
     report_rx: Option<Receiver<Result<PathBuf, String>>>,
     report_msg: String,
+    big: Option<Vec<(PathBuf, u64)>>,
+    big_rx: Option<Receiver<Vec<(PathBuf, u64)>>>,
+    big_root: PathBuf,
 }
 
 impl State {
@@ -165,7 +193,83 @@ impl State {
         self.rows(key).next()
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+    fn start_big(&mut self, ctx: &egui::Context, root: PathBuf) {
+        let (tx, rx) = channel();
+        self.big_rx = Some(rx);
+        self.scan_count = Arc::new(AtomicU64::new(0));
+        self.big_root = root.clone();
+        let (ctx, count) = (ctx.clone(), self.scan_count.clone());
+        thread::spawn(move || {
+            let mut v = Vec::new();
+            walk_big(&root, &mut v, &count);
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.truncate(MAX_BIG);
+            let _ = tx.send(v);
+            ctx.request_repaint();
+        });
+    }
+
+    fn big_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let busy = self.big_rx.is_some();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Buscar en:").color(GRAY));
+            let mut roots: Vec<(String, PathBuf)> = Vec::new();
+            if let Ok(home) = std::env::var("USERPROFILE") {
+                roots.push(("DESCARGAS".into(), PathBuf::from(&home).join("Downloads")));
+                roots.push(("MI USUARIO".into(), PathBuf::from(home)));
+            }
+            roots.push(("TODO C:".into(), PathBuf::from("C:\\")));
+            for (name, p) in roots {
+                if pixel_small(ui, &name, BLUE, !busy).clicked() {
+                    self.start_big(ctx, p);
+                }
+            }
+        });
+        ui.add_space(6.0);
+        let list_h = ui.available_height() - 40.0;
+        pixel_frame(PANEL).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if busy {
+                ui.label(egui::RichText::new(format!("Buscando en {} ...", self.big_root.display())).color(YELLOW).size(13.0));
+                note(ui, &format!("{} archivos revisados", self.scan_count.load(Ordering::Relaxed)));
+                pixel_progress(ui, None, false);
+                return;
+            }
+            let Some(big) = &self.big else {
+                ui.label(egui::RichText::new("ARCHIVOS GRANDES").color(YELLOW).size(13.0));
+                note(ui, "Busca los archivos de más de 100 MB (los 80 más pesados).\nRevísalos y bórralos tú desde el Explorador si no los necesitas.");
+                return;
+            };
+            let total: u64 = big.iter().map(|b| b.1).sum();
+            ui.label(egui::RichText::new(format!("{} archivos  ·  {} en total  ·  {}", big.len(), gb(total as f64), self.big_root.display())).color(YELLOW).size(13.0));
+            egui::ScrollArea::vertical().id_salt("bigfiles").max_height(list_h.max(80.0) - 30.0).auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (p, s) in big {
+                    ui.horizontal(|ui| {
+                        if pixel_small(ui, "MOSTRAR", GRAY, true).on_hover_text("Abrir su carpeta con el archivo seleccionado").clicked() {
+                            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn();
+                        }
+                        ui.label(egui::RichText::new(format!("{:>9}", gb(*s as f64))).color(LIME).monospace().size(12.0));
+                        ui.label(egui::RichText::new(p.display().to_string()).color(TEXT).size(12.0));
+                    });
+                }
+                if big.is_empty() {
+                    note(ui, "No hay archivos de más de 100 MB aquí.");
+                }
+            });
+        });
+        note(ui, "La app no borra nada aquí: solo te los enseña.");
+    }
+
+    /// `views`: subpestañas a mostrar (vacío = sin barra; la pestaña la elige quien llama).
+    pub fn ui(&mut self, ui: &mut Ui, ctx: &egui::Context, views: &[(u8, &str)]) {
+        if let Some(Ok(v)) = self.big_rx.as_ref().map(|r| r.try_recv()) {
+            self.big = Some(v);
+            self.big_rx = None;
+        }
+        if self.big_rx.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
         if !self.loaded {
             self.refresh_info(ctx);
         }
@@ -191,25 +295,31 @@ impl State {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
 
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if self.view != 1 && self.view < 3 && pixel_small(ui, "RECARGAR", GRAY, self.info_rx.is_none()).clicked() {
-                    self.refresh_info(ctx);
-                }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true), |ui| {
-                    for (v, name) in [(0u8, "EQUIPO"), (1, "ESPACIO EN DISCO"), (2, "BATERÍA"), (3, "DIAGNÓSTICO"), (4, "DRIVERS"), (5, "RESPALDO")] {
-                        if pixel_tab(ui, name, self.view == v).clicked() {
-                            self.view = v;
-                        }
+        if !views.is_empty() {
+            if !views.iter().any(|(v, _)| *v == self.view) {
+                self.view = views[0].0;
+            }
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if (self.view == 0 || self.view == 2) && pixel_small(ui, "RECARGAR", GRAY, self.info_rx.is_none()).clicked() {
+                        self.refresh_info(ctx);
                     }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true), |ui| {
+                        for (v, name) in views {
+                            if pixel_tab(ui, name, self.view == *v).clicked() {
+                                self.view = *v;
+                            }
+                        }
+                    });
                 });
             });
-        });
-        ui.add_space(8.0);
+            ui.add_space(8.0);
+        }
         match self.view {
             1 => self.disk_ui(ui, ctx),
             2 => self.battery_ui(ui, ctx),
+            6 => self.big_ui(ui, ctx),
             3..=5 => {}
             _ => self.info_ui(ui),
         }
